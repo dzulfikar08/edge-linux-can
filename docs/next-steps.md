@@ -59,25 +59,69 @@ board with FlexCAN (`meta-freescale`). Steps: add the BSP layer, set
 it. `can-bitrate@can0` and `can-demo@can0` work unchanged because they start
 when `can0` appears.
 
-## 3. Software quality in the image
+## 3. Software quality in the image: done (2026-11-11), with gaps
 
-- `ptest` for can-demo (`inherit ptest-cargo`) so `cargo test` runs on the
-  target with `ptest-runner`.
-- `oe-selftest`-style image tests: `IMAGE_CLASSES += "testimage"` and
-  `bitbake -c testimage edge-image` instead of the custom smoke script, with
-  a test case under `lib/oeqa/runtime/cases/` that checks `candump`.
-- CVE scanning: `INHERIT += "cve-check"` (or the newer `sbom-cve-check`) and
-  SPDX SBOM output, both built into oe-core.
-- Pin `can-demo` by git `SRCREV` instead of `file://` so each image records
-  the exact app commit.
-- A small DBC file for the heartbeat (`0x100`/`0x101`: `seq` u32 LE,
-  `magic` "HBT1") so CAN tools decode it by signal (done: `docs/can-demo.dbc`).
+Implemented: can-demo has a `-ptest` package (`ptest-cargo`) whose 13 Rust
+tests pass on the device under `ptest-runner`; a test image
+(`edge-image-test`) runs oe-core's `testimage` with the built-in ping, ssh,
+date, systemd, ptest and parselogs cases plus our own `edge_can` case
+(19 passed, 6 skipped, 0 failed); every image gets an SPDX 3.0 SBOM and a
+CVE report from `sbom-cve-check` (the old `cve-check` class no longer
+exists); can-demo is fetched from git at a pinned `SRCREV`; the DBC
+describes the FD frames and the tests decode with it. How it works:
+[learning-guide.md, part 3](learning-guide.md#part-3-tests-in-the-image-sbom-and-cves-pinned-sources-can-fd);
+what happened: [build-journal.md, part 3](build-journal.md#part-3-tests-sbom-and-cves-can-fd).
 
-## 4. CAN FD
+Differences from the plan: testimage **complements** the scripts instead of
+replacing them. It took over the single-boot checks (as `edge_can.py`); the
+A/B test stays a script because it needs several reboots of one disk with
+U-Boot's environment kept, and the smoke test stays because it checks the
+product image (no ssh) over the serial console and can switch CAN
+controllers. ptest runs in a separate test image, not in the product.
 
-QEMU's `ctucan_pci` device is CAN FD capable and the driver is already in the
-kernel fragment. Switch `kvaser_pci` for `ctucan_pci` in `qemu-smoke.py`,
-set `ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on`, and
-extend can-demo to use `canfd_frame` (64-byte payload, `CAN_RAW_FD_FRAMES`
-socket option). Host `vcan0` here has MTU 2060, so it already carries FD
-frames.
+Still open:
+
+1. **Triage the CVE report.** 735 unpatched entries, 594 of them kernel.
+   Move the kas pins to the newest Wrynose point release (and 6.18 stable
+   kernel) and rerun; then go through the user-space list (curl, openssl,
+   glibc, expat, u-boot, busybox) and record decisions with `CVE_STATUS`
+   in bbappends, so "unpatched" means "needs work" again.
+2. **A distro without `x11`.** Poky's `x11` distro feature pulls libx11
+   into this headless image through `dbus`. A small distro config of our own
+   (`DISTRO = "edge"`, based on poky, without x11/wayland/opengl/vulkan)
+   would remove it and shrink the image; it means rebuilding most packages.
+3. **Fail the build on new critical CVEs**: a small check after
+   `do_sbom_cve_check` that compares the report with an accepted list.
+4. **Run the CVE scan on a schedule**, not only on builds: the databases
+   change daily, a shipped release does not. Bumping the pinned database
+   commits and rerunning only `do_sbom_cve_check` for a released image
+   is enough.
+5. **testimage for the A/B story**: a custom oeqa target that keeps the
+   disk and U-Boot environment across reboots would let the A/B test use
+   oeqa's reporting too. Not worth it while the script works.
+6. **Licence compliance output**: `INHERIT += "archiver"` and the licence
+   manifest, for the source-code obligations of GPL components.
+
+## 4. CAN FD: done (2026-11-11), with gaps
+
+QEMU's `ctucan_pci` replaced `kvaser_pci` in the smoke test and testimage;
+`can-bitrate@can0` runs `/usr/libexec/can-up`, which sets
+`bitrate 500000 dbitrate 2000000 fd on` and falls back to classic CAN on
+controllers without FD; can-demo sends classic heartbeats plus 64-byte FD
+telemetry (BRS) and receives both. Verified in both directions over host
+`vcan0`, with the DBC, and the classic fallback with `kvaser_pci`. The
+zephyr-bms-can project's test (36/36) and edge demo (13/13) still pass, also
+with FD traffic on the shared bus.
+
+Still open:
+
+1. **Real FD hardware**: a controller and transceiver (e.g. an MCP2518FD
+   on a Raspberry Pi, or i.MX 8M Plus FlexCAN FD), where the data-phase bit
+   timing, sample points and transmitter delay compensation (`tdcv`,
+   `tdco`) actually matter.
+2. **zephyr-bms-can's edge demo** still boots its own older copy of the image
+   (kvaser, classic). Refreshing that copy would show the new image against
+   the BMS; the classic fallback it would need is tested here.
+3. **QEMU's controller state**: the CTU CAN FD model never raises the
+   fault-confinement interrupt, so Linux reports `STOPPED`. Could be fixed
+   in QEMU (raise FCSI when the core is enabled); not done.

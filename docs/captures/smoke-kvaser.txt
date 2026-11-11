@@ -1,0 +1,20 @@
+$ CAN_DEV=kvaser scripts/qemu-smoke.sh
+[PASS] boots to a login prompt (53s)
+[PASS] systemd reports 'running'
+[PASS] root filesystem is read-only
+[PASS] /data mounted, /etc is an overlay, /var/log -> /data/log
+[PASS] rauc status: slot A booted, slots A and B known
+[PASS] health check passed and slot marked good
+[PASS] vcan0 exists and is UP
+[PASS] vcan@vcan0 and can-demo@vcan0 active
+[PASS] candump vcan0 sees can-demo heartbeats (id 100)
+[PASS] candump vcan0 sees can-demo CAN FD telemetry (id 200, 64 bytes)
+[PASS] can0 (kvaser_pci, classic only): can-up fell back to classic CAN, mtu 16, can-demo sends no FD
+[PASS] can-bitrate@can0 and can-demo@can0 active
+[PASS] candump can0 sees own heartbeat (101) and host frames (321)
+[PASS] systemd drives the i6300esb hardware watchdog
+[PASS] can-demo logs frame statistics to the journal (FD frames counted, no errors, none damaged)
+[PASS] clean poweroff
+16/16 checks passed
+[PASS] host vcan0 received no FD frames from the classic-only controller
+[PASS] host vcan0 received guest heartbeats (id 101)

@@ -1,7 +1,7 @@
 $ scripts/qemu-smoke.sh
 host vcan0 is up: bridging it to guest can0
-+ runqemu qemuarm64 edge-image wic nographic slirp snapshot qemuparams=-device i6300esb -object can-bus,id=canbus0 -object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0 -device kvaser_pci,canbus=canbus0
-[PASS] boots to a login prompt (92s)
++ runqemu qemuarm64 edge-image wic nographic slirp snapshot qemuparams=... -device ctucan_pci,canbus0=canbus0,canbus1=canbus1
+[PASS] boots to a login prompt (28s)
 [PASS] systemd reports 'running'
 [PASS] root filesystem is read-only
 [PASS] /data mounted, /etc is an overlay, /var/log -> /data/log
@@ -10,24 +10,13 @@ host vcan0 is up: bridging it to guest can0
 [PASS] vcan0 exists and is UP
 [PASS] vcan@vcan0 and can-demo@vcan0 active
 [PASS] candump vcan0 sees can-demo heartbeats (id 100)
-[PASS] can0 (kvaser_pci) exists, UP, ERROR-ACTIVE
+[PASS] candump vcan0 sees can-demo CAN FD telemetry (id 200, 64 bytes)
+[PASS] can0 (ctucan_pci) UP, CAN FD on: mtu 72, 500 kbit/s + 2 Mbit/s data
 [PASS] can-bitrate@can0 and can-demo@can0 active
-[PASS] candump can0 sees own heartbeat (101) and host frames (321)
+[PASS] candump can0: own heartbeat (101) and FD telemetry (201), host classic (321) and FD (322) frames
 [PASS] systemd drives the i6300esb hardware watchdog
-[PASS] can-demo logs frame statistics to the journal
+[PASS] can-demo logs frame statistics to the journal (FD frames counted, no errors, none damaged)
 [PASS] clean poweroff
-
-15/15 checks passed
-host side (vcan0):
-{
-  "iface": "vcan0",
-  "sent_id": "321",
-  "sent": 343,
-  "received": {
-    "101": 73
-  },
-  "first_payload": {
-    "101": "0000000048425431"
-  },
-  "seconds": 177.5
-}[PASS] host vcan0 received guest heartbeats (id 101)
+16/16 checks passed
+[PASS] host vcan0 received guest CAN FD telemetry (id 201, 64 bytes intact, decoded with the DBC)
+[PASS] host vcan0 received guest heartbeats (id 101)

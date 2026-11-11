@@ -20,6 +20,14 @@ can-demo@can0 ── CAN_RAW socket ─┐
                                                             ◄──  host-can.py (sends 0x321)
 ```
 
+Since part 3 the guest's controller is a **CTU CAN FD** card instead
+(`-object can-bus,id=canbus1 -device ctucan_pci,canbus0=canbus0,canbus1=canbus1`,
+driver `ctucanfd_pci`), running CAN FD at 500 kbit/s / 2 Mbit/s; the
+Kvaser card is still available with `CAN_DEV=kvaser scripts/qemu-smoke.sh`.
+The diagram and the logs below are from the first stage (Kvaser, classic
+CAN). CAN FD across the bridge: [learning-guide.md, chapter 26](learning-guide.md#26-can-fd)
+and [build-journal.md, part 3](build-journal.md#18-smoke-test-three-problems-all-in-the-test-or-the-emulator).
+
 Frame ids used:
 
 | Id | Sender | Payload |
@@ -27,6 +35,9 @@ Frame ids used:
 | `0x100` | can-demo on guest `vcan0` (never leaves the guest) | `seq:u32 LE` + `"HBT1"` |
 | `0x101` | can-demo on guest `can0`, so it reaches the host | `seq:u32 LE` + `"HBT1"` |
 | `0x321` | `scripts/host-can.py` on the host | `"HOST"` + `count:u32 LE` |
+| `0x200` | can-demo on guest `vcan0`, **CAN FD**, 64 bytes (part 3) | seq, `"FDT1"`, uptime, frames received, start count, pattern |
+| `0x201` | can-demo on guest `can0`, **CAN FD**, 64 bytes, BRS (part 3) | same |
+| `0x322` | `scripts/host-can.py`, **CAN FD**, 64 bytes, BRS (part 3) | `"HOSTFD01"`, `count:u32 LE`, pattern |
 
 [`docs/can-demo.dbc`](can-demo.dbc) describes all three.
 

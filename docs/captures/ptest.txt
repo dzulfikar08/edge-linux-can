@@ -1,0 +1,26 @@
+START: ptest-runner
+2026-11-11T06:33
+BEGIN: /usr/lib/can-demo/ptest
+
+running 13 tests
+test can::tests::fd_lengths_follow_the_dlc_table ... ok
+test can::tests::frame_layout_matches_kernel ... ok
+test can::tests::standard_and_extended_ids ... ok
+test can::tests::rejects_oversized ... ok
+test can::tests::vcan0_classic_and_fd_round_trip ... ok
+test can::tests::wire_round_trip ... ok
+test tests::counts_heartbeat_gaps ... ok
+test tests::defaults ... ok
+test tests::flags_override_env ... ok
+test tests::rejects_bad_input ... ok
+test tests::fd_options ... ok
+test tests::telemetry_round_trip_and_damage ... ok
+test state::tests::counts_starts_per_interface ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+PASS: /usr/lib/can-demo/ptest/can_demo-1a570fc8e0467e34
+DURATION: 0
+END: /usr/lib/can-demo/ptest
+2026-11-11T06:33
+STOP: ptest-runner

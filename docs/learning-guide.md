@@ -29,7 +29,12 @@ Contents
 19. [RAUC: slots, bundles, signing](#19-rauc-slots-bundles-signing)
 20. [Health checks and rollback](#20-health-checks-and-rollback)
 21. [Testing it: scripts/qemu-ab.sh](#21-testing-it-scriptsqemu-absh)
-22. [Glossary](#22-glossary)
+22. [ptest: a package's own tests, on the device](#22-ptest-a-packages-own-tests-on-the-device)
+23. [oeqa and testimage](#23-oeqa-and-testimage-oe-cores-test-framework)
+24. [SBOM and CVE checking (and the EU Cyber Resilience Act)](#24-sbom-and-cve-checking)
+25. [Pinning sources: SRCREV](#25-pinning-sources-srcrev)
+26. [CAN FD](#26-can-fd)
+27. [Glossary](#27-glossary)
 
 ---
 
@@ -322,7 +327,8 @@ scripts/kas shell kas/qemuarm64.yml -c 'bitbake -c update_crates can-demo'
 ```
 
 The recipe ([`can-demo_0.1.0.bb`](../layers/meta-edge/recipes-apps/can-demo/can-demo_0.1.0.bb))
-takes its source from this repository instead of a git URL:
+first took its source straight from this repository's working tree (part 3
+replaced this with a git fetch at a pinned commit, [chapter 25](#25-pinning-sources-srcrev)):
 
 ```bitbake
 FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../apps:"
@@ -334,8 +340,9 @@ require ${BPN}-crates.inc
 
 `file://` on a directory means BitBake checksums every file in it, so editing
 the Rust code reruns the recipe. In a product you would usually point
-`SRC_URI` at a git repo and tag (`git://...;protocol=https;branch=main` plus
-`SRCREV`), so the image records exactly which commit it contains.
+`SRC_URI` at a git repo (`git://...;protocol=https;branch=main` plus
+`SRCREV`), so the image records exactly which commit it contains; this
+project does that since part 3.
 
 Design choice: the app talks to SocketCAN through `libc` directly (one
 dependency) instead of the `socketcan` crate (about a dozen). Fewer crates
@@ -363,7 +370,8 @@ commands finish so other units can order after it. Enabled for `vcan0`,
 
 **`can-bitrate@.service`** (oneshot): a real CAN controller must have a bit
 rate before it can go up. `ip link set %I type can bitrate 500000 restart-ms 100`
-then `up`. It is `WantedBy=sys-subsystem-net-devices-%i.device`: systemd
+then `up` (since part 3 through `/usr/libexec/can-up`, which adds the CAN FD
+data bit rate when the controller supports it, [chapter 26](#26-can-fd)). It is `WantedBy=sys-subsystem-net-devices-%i.device`: systemd
 creates a `.device` unit for every network interface, so this starts *when
 can0 appears*, which is when the PCI driver binds. If the hardware is absent
 (QEMU started without the CAN device), it simply never starts; no failed unit.
@@ -464,9 +472,9 @@ a network interface (`can0`), and applications use BSD sockets of family
 `struct can_frame` (16 bytes: 32-bit id with flag bits, length, 8 data bytes):
 
 ```rust
-// apps/can-demo/src/can.rs
+// apps/can-demo/src/can.rs (classic frames; CAN FD: chapter 26)
 #[repr(C)]
-pub struct CanFrame { pub can_id: u32, pub len: u8, _pad: u8, _res0: u8, _len8_dlc: u8, pub data: [u8; 8] }
+struct RawCanFrame { can_id: u32, len: u8, _pad: u8, _res0: u8, _len8_dlc: u8, data: [u8; 8] }
 // socket(PF_CAN, SOCK_RAW, CAN_RAW); bind(sockaddr_can { ifindex }); read()/write() whole frames
 ```
 
@@ -501,7 +509,8 @@ QEMU can emulate CAN controllers and connect them to a virtual bus:
 ```
 
 The guest sees a PCI Kvaser card; the `kvaser_pci` driver binds and creates
-`can0`. Frames the guest sends on `can0` appear on the host's `vcan0`, and
+`can0`. (Part 3 replaced it with a CAN FD controller, `ctucan_pci`:
+[chapter 26](#26-can-fd).) Frames the guest sends on `can0` appear on the host's `vcan0`, and
 frames written to host `vcan0` arrive at guest `can0`. On the host you can
 watch with any SocketCAN tool, or with `scripts/can-watch.py`, which decodes
 the frames with [`docs/can-demo.dbc`](can-demo.dbc).
@@ -863,6 +872,583 @@ The serial log of a full run is [`ab-test.log`](ab-test.log); all 24
 checks and the timings are in
 [build-journal.md](build-journal.md#ab-test-run-2-build-6-2424-in-581-s).
 
+## Part 3: tests in the image, SBOM and CVEs, pinned sources, CAN FD
+
+Chapters 22 to 28 cover the third stage: the app's unit tests run on the
+device (ptest), oe-core's own test framework boots the image and checks it
+(testimage), the build produces an SBOM and a CVE report, the app is fetched
+from git at a fixed commit, and the CAN side moved from classic CAN to
+CAN FD. Commands, problems and timings:
+[build-journal.md, part 3](build-journal.md#part-3-tests-sbom-and-cves-can-fd).
+
+## 22. ptest: a package's own tests, on the device
+
+Most open-source projects have a test suite (`make check`, `cargo test`).
+Running it on the build host proves little for an embedded product: the
+host has a different CPU, C library, kernel and configuration. **ptest**
+("package test") is oe-core's convention for building a package's tests
+for the *target* and running them *there*:
+
+- A recipe that `inherit`s `ptest` (or a variant) gets an extra package,
+  `<name>-ptest`, which installs the test programs and a script
+  `/usr/lib/<name>/ptest/run-ptest`.
+- `run-ptest` prints one line per test, `PASS: <name>`, `FAIL: <name>` or
+  `SKIP: <name>`, and exits non-zero on failure. That output format is the
+  whole contract.
+- **`ptest-runner`** (a small C program in the image) finds every
+  `/usr/lib/*/ptest/run-ptest`, runs each with a timeout and prints a summary.
+  `ptest-runner can-demo` runs just one package.
+- It only happens if `ptest` is in `DISTRO_FEATURES` (Poky has it by default)
+  and the `-ptest` package is installed. The image feature `ptest-pkgs` would
+  install the `-ptest` package of *everything* in the image (systemd, glib,
+  openssl, ...: hundreds of MB and hours of test time), so this project
+  installs only `can-demo-ptest`.
+
+For Rust, oe-core has **`ptest-cargo.bbclass`**. Replace `inherit cargo` with
+`inherit ptest-cargo` and it adds two tasks: `do_compile_ptest_cargo` runs
+`cargo build --tests --message-format json` with the cross toolchain (cargo
+names test binaries with a hash, `can_demo-1a2b3c...`, so the class reads
+cargo's JSON output to find them), and `do_install_ptest_cargo` copies them
+to `/usr/lib/can-demo/ptest/` and writes `run-ptest`:
+
+```sh
+#!/bin/sh
+if [ -z "$rc" ]; then rc=0; fi
+if ! /usr/lib/can-demo/ptest/can_demo-<hash>
+then
+    rc=1
+    echo "FAIL: /usr/lib/can-demo/ptest/can_demo-<hash>"
+else
+    echo "PASS: /usr/lib/can-demo/ptest/can_demo-<hash>"
+fi
+exit $rc
+```
+
+So ptest sees **one result per test binary**, not per `#[test]`: can-demo
+is a single binary crate, which makes one ptest result covering 13 Rust
+tests. The individual results are in the test binary's own output (`test
+can::tests::wire_round_trip ... ok`), which ptest-runner prints.
+
+What running on the device adds over `cargo test` on the laptop:
+
+- The struct layout tests (`size_of::<RawCanFdFrame>() == 72`) run on
+  aarch64 with the target's libc, which is where the layout has to be right.
+- `vcan0_classic_and_fd_round_trip` opens real SocketCAN sockets on the
+  device's `vcan0` and sends a classic and an FD frame through the kernel.
+  On a host without `vcan0` it prints "skipped" and passes.
+- The test binary is built with the same compiler, flags and `libc` crate
+  as the shipped binary.
+
+Where the test code lives: a separate image, `edge-image-test`, is
+`edge-image` plus `ptest-runner`, `can-demo-ptest` and an ssh server
+(needed by testimage, next chapter). The product image and the update
+bundles stay free of test code and of an ssh server. Since the test image
+`require`s the product image, it has the same packages, disk layout, boot
+path and read-only root, so tests on it test the product's software. A
+product would often do the same thing with a `-test` or `-dev` image, or
+with a `MACHINE`/`DISTRO` override for test builds.
+
+On the device:
+
+```sh
+root@qemuarm64:~# ptest-runner can-demo
+START: ptest-runner
+BEGIN: /usr/lib/can-demo/ptest
+
+running 13 tests
+test can::tests::rejects_oversized ... ok
+test can::tests::fd_lengths_follow_the_dlc_table ... ok
+...
+test can::tests::vcan0_classic_and_fd_round_trip ... ok
+...
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+PASS: /usr/lib/can-demo/ptest/can_demo-1a570fc8e0467e34
+DURATION: 0
+END: /usr/lib/can-demo/ptest
+```
+
+(From the testimage run, where oeqa's `ptest` case runs `ptest-runner -t 450`.)
+
+![ptest-runner on the device](images/ptest.png)
+
+## 23. oeqa and testimage: oe-core's test framework
+
+**oeqa** is oe-core's Python test framework (on top of `unittest`), used by
+the Yocto Project's own autobuilder. It has several layers: `oe-selftest`
+tests the build system itself, `testsdk` tests an SDK, and **`testimage`**
+boots an image and runs tests *against the running system*.
+
+```bitbake
+IMAGE_CLASSES += "testimage"       # adds the do_testimage task to images
+TEST_SUITES = "ping ssh date systemd ptest parselogs edge_can"
+```
+
+```sh
+bitbake -c testimage edge-image-test
+```
+
+What `do_testimage` does:
+
+1. Starts the image with **runqemu** (the image's `qemuboot.conf`, so here
+   U-Boot and the wic disk, in `snapshot` mode), with the serial console on
+   a TCP socket.
+2. Waits for `login:` on the serial console, logs in as root.
+3. Finds the guest's IP address and runs every test case listed in
+   `TEST_SUITES`. A test case is a Python class in
+   `lib/oeqa/runtime/cases/<name>.py` of any layer; `self.target.run(cmd)`
+   runs a command **over ssh** and returns `(status, output)`.
+4. Writes the results (`tmp/log/oeqa/testresults.json`, and the task log) and
+   fails the task if a test failed.
+
+The built-in cases used here:
+
+| Case | Checks |
+|---|---|
+| `ping` | the target answers ping. With slirp the target address is `127.0.0.1` and the case returns without pinging (it passes, but proves nothing here) |
+| `ssh` | `uname -a` over ssh works; most other cases depend on it |
+| `date` | the date can be read and set |
+| `systemd` | `systemctl` works, **no failed units**, the journal has the boot and the boot time. Its service tests need `avahi-daemon` and are skipped here |
+| `ptest` | runs `ptest-runner` on the target, parses the PASS/FAIL lines, fails on any failure |
+| `parselogs` | greps `dmesg` and the logs for error messages, with a list of known harmless ones per machine |
+
+Settings that matter for this project (in `kas/qemuarm64.yml`):
+
+- `TEST_RUNQEMUPARAMS = "slirp"`. By default testimage uses a **tap**
+  network device, which needs root to create (`runqemu-gen-tapdevs` with
+  sudo). With slirp (user-mode networking) QEMU forwards a host port to the
+  guest's ssh port 22, and oeqa connects to `127.0.0.1:<port>`.
+- testimage requires the image features `allow-empty-password
+  empty-root-password allow-root-login` (it logs in as root without a
+  password); this development build already has them.
+- `TEST_QEMUPARAMS` adds QEMU arguments: the i6300esb watchdog, and, when
+  host `vcan0` is up, the CTU CAN FD controller bridged to it
+  ([`kas/testimage-can.conf`](../kas/testimage-can.conf), passed with
+  `bitbake -R` by [`scripts/testimage.sh`](../scripts/testimage.sh)).
+
+The project's own case,
+[`edge_can.py`](../layers/meta-edge/lib/oeqa/runtime/cases/edge_can.py),
+checks what the smoke script checked, as oeqa tests:
+
+```python
+class EdgeCanTest(OERuntimeTestCase):
+    @OETestDepends(["ssh.SSHTest.test_ssh"])
+    def test_readonly_root_and_data(self):
+        status, out = self.target.run("touch /usr/oeqa-write-test")
+        self.assertNotEqual(status, 0)
+        ...
+```
+
+- read-only root, `/data` mounted, `/etc` and `/var/lib` overlays
+- `rauc status --output-format=json`: compatible string, slot A booted
+  and marked good
+- `vcan0` up and able to carry FD frames (MTU 72 or more), `vcan@vcan0`
+  and `can-demo@vcan0` active
+- `candump -L` on `vcan0`: three heartbeats, decoded with the project's
+  DBC (`Magic` = "HBT1", consecutive `Seq`); two FD telemetry frames
+  (64 bytes, bit rate switch, pattern intact)
+- the journal's statistics line: frames counted, FD frames counted, no
+  errors, no damaged FD frames, no missed heartbeats
+- with the bridge: `can0` is in FD mode (500 kbit/s, 2 Mbit/s data phase,
+  MTU 72, driver `ctucanfd`), and the test itself, running on the host side,
+  sends classic and FD frames on host `vcan0` and checks that the guest
+  receives them, while collecting the guest's heartbeat and FD telemetry
+  on the host. (oeqa runs in the kas container, which shares the host's
+  network namespace for this, so the test can open a socket on `vcan0`.)
+
+Decoding uses [`scripts/minidbc.py`](../scripts/minidbc.py) and
+[`docs/can-demo.dbc`](can-demo.dbc), found through `EDGE_REPO_DIR`. Values
+that are in the image's `testdata.json` (written at build time) are read
+with `self.td["NAME"]`; `EDGE_CAN_HOST` is added to
+`TESTIMAGE_UPDATE_VARS` so it is read when the test runs instead.
+
+The result on this project (25 tests: 19 passed, 6 skipped, none failed;
+the skips are oe-core cases that need avahi, `minidebuginfo` or a writable
+root, and the "expected failure" variant of the ptest case):
+
+![testimage results](images/testimage.png)
+
+### testimage or the custom scripts?
+
+Both are kept, each for what it does better.
+
+| | testimage | `qemu-smoke.sh` / `qemu-ab.sh` |
+|---|---|---|
+| Boot | runqemu, `snapshot`; one boot per run | smoke: runqemu; A/B: `qemu-system-aarch64` directly, six boots in one QEMU process |
+| Talks to the guest | ssh (needs an ssh server in the image) | serial console (works on the product image, no ssh) |
+| Test language | Python `unittest` classes, dependencies between tests, standard result files | a list of checks in a script |
+| Reboots, U-Boot environment, disk persistence | no: a reboot ends the session, and `snapshot` throws writes away | yes: the A/B test keeps a disk copy and U-Boot's environment in a flash file across reboots |
+| Comes with | ptest, systemd, parselogs and other cases maintained by oe-core | nothing |
+| Runs in CI | `bitbake -c testimage`, results in a standard JSON format | own exit codes and logs |
+
+So: everything that checks **one booted system** is now an oeqa test
+(`edge_can.py` plus the built-in cases), and that is where new checks of
+that kind should go. The **A/B update and rollback test stays a script**:
+it needs several reboots of the same disk, U-Boot's environment surviving
+them, a broken release booting three times and a fallback, which runqemu's
+`snapshot` mode and testimage's one-boot session do not model. oeqa can do
+more with effort (a `TEST_TARGET` class of your own, or `runqemu` without
+snapshot), but the script is already the clearer test of that story. The
+smoke script stays too: it tests the **product** image, which has no ssh
+server, over the serial console, and it can switch the CAN controller
+(`CAN_DEV=kvaser`) to test the classic-CAN fallback.
+
+## 24. SBOM and CVE checking
+
+### What an SBOM is
+
+A **Software Bill of Materials** lists every component in a product: name,
+version, licence, where the source came from (URL and checksum or commit),
+which patches were applied, and how components relate (this package was
+built from that recipe, contains these files, depends on those packages).
+Two standard formats exist: **SPDX** (Linux Foundation, ISO/IEC 5962) and
+CycloneDX (OWASP).
+
+Yocto is well placed to produce one, because it builds everything from
+source and knows every input. In oe-core 6.0, `create-spdx` is inherited by
+default (`INHERIT_DISTRO` in `defaultsetup.conf`) and writes **SPDX 3.0**
+JSON-LD: one document per recipe and package during the build
+(`tmp/deploy/spdx/`), and one combined document per image:
+
+```
+tmp/deploy/images/qemuarm64/edge-image-qemuarm64.rootfs.spdx.json
+```
+
+For `edge-image` that file is 46 MB of JSON: 549 package elements
+(source, recipe and binary packages), 36,604 files with checksums, 212
+build records and 34,488 relationships between them. It contains the image's packages with their
+versions, licences, the source download locations (for can-demo: the
+git URL at the pinned commit), the patches, and, with
+`SPDX_INCLUDE_VEX`, vulnerability information.
+
+### CVEs, and how Yocto tracks them
+
+A **CVE** (Common Vulnerabilities and Exposures) is a public identifier
+for one known vulnerability, e.g. `CVE-2024-6387` (an OpenSSH bug). The
+**NVD** (US National Vulnerability Database) and the **CVE List** (the CVE
+Program's own repository, `cvelistV5`) say which products and versions each
+CVE affects, using **CPE** names (vendor:product:version).
+
+A CVE check matches each component's name and version against those
+databases. Then each match gets a status:
+
+| Status | Meaning |
+|---|---|
+| **Patched** | not vulnerable as built. The report's `detail` field says why: `fixed-version` (this version is newer than the fix), `cpe-stable-backport` (the fix is in this stable kernel release), `fix-file-included` (the recipe applies a patch whose header says `CVE: CVE-2025-1234`), or `version-not-in-range` (the database's affected range does not include this version) |
+| **Ignored** | someone decided it does not apply here and recorded why in `CVE_STATUS` (e.g. `not-applicable-config`: the vulnerable code is not compiled; `not-applicable-platform`: Windows-only; `disputed`; `upstream-wontfix`; `cpe-incorrect`: the database matched the wrong product) |
+| **Unpatched** | the version is affected and nothing in the metadata says it is fixed or irrelevant: **needs a human to look at it**. It may be a real hole, or a database match that is too wide. |
+
+So "Patched" is mostly "this version was never or is no longer affected"
+rather than "someone patched it": of 21,861 Patched entries for
+`edge-image`, 55 are fixed by a patch file in a recipe.
+
+**VEX** (Vulnerability Exploitability eXchange) is the machine-readable
+form of exactly that table: "component X is (not) affected by CVE Y,
+because Z". With `SPDX_INCLUDE_VEX = "all"` the SBOM carries a VEX record
+for every CVE oe-core knows about for each recipe.
+
+### cve-check is gone; sbom-cve-check
+
+Older guides say `INHERIT += "cve-check"`. In this release that class no
+longer exists (`ls meta/classes*/ | grep cve` shows only `sbom-cve-check*`).
+Its replacement, **`sbom-cve-check`**, works on the image's SPDX 3.0 SBOM
+instead of on recipes: the separate tool `sbom-cve-check` (Python, built as
+`python3-sbom-cve-check-native`) reads the SBOM, including the VEX records
+and the compiled-file lists, and matches it against two databases that are
+git repositories: NVD data (from `fkie-cad/nvd-json-data-feeds`) and
+`CVEProject/cvelistV5`. oe-core enables it with a **configuration
+fragment**:
+
+```sh
+bitbake-config-build enable-fragment core/yocto/sbom-cve-check
+```
+
+which sets `IMAGE_CLASSES += "sbom-cve-check"`, `SPDX_INCLUDE_VEX = "all"`,
+`SPDX_INCLUDE_COMPILED_SOURCES:pn-linux-yocto = "1"` and the databases'
+`SRCREV` to `AUTOREV` (the newest commit on every build). This project sets
+the same variables in `kas/qemuarm64.yml`, with two changes: the database
+commits are **pinned** (so the report can be reproduced, and a build does
+not download a new database every time; bump them with `git ls-remote`),
+and they are fetched **shallow** (`BB_GIT_SHALLOW`: one commit instead of
+the full history, which is several GB per repository).
+
+`SPDX_INCLUDE_COMPILED_SOURCES` for the kernel matters: the Linux kernel
+has thousands of CVEs, most in drivers a given kernel does not build. With
+the list of compiled source files in the SBOM, the tool can tell
+"vulnerable file not compiled" apart from "affected".
+
+Output, next to each image in the deploy directory:
+
+| File | Content |
+|---|---|
+| `<image>.rootfs.sbom-cve-check.yocto.json` | the old cve-check format: per package, every CVE with status |
+| `<image>.rootfs.sbom-cve-check.spdx.json` | the SBOM again, with the CVE results added (SPDX 3.0) |
+
+### The report for this image
+
+[`scripts/cve-summary.py`](../scripts/cve-summary.py) turns the JSON into
+[`docs/cve/edge-image-summary.md`](cve/edge-image-summary.md):
+
+![CVE summary for edge-image](images/cve-summary.png)
+
+How to read it:
+
+- **The SBOM has 106 recipes, the image installs packages from 64.** The
+  rest (python3, sqlite3, wayland, ...) only took part in building. The
+  script maps the image manifest to recipes through `pkgdata` and counts
+  both; 703 of the 735 unpatched entries are in installed recipes.
+- **The kernel dominates: 594 unpatched entries** for Linux 6.18.52,
+  against 19,860 patched and 1,237 ignored as `not-applicable-config` (in
+  files this kernel does not compile; that is what
+  `SPDX_INCLUDE_COMPILED_SOURCES` bought). The kernel project is its own
+  CVE numbering authority and assigns a CVE to most bug fixes, which is why
+  the numbers are this large. 581 of the 594 are 2026 CVEs whose affected
+  range includes 6.18.52: fixed in a later 6.18 stable release or not
+  fixed yet. The other 13 are old entries without version ranges (e.g.
+  CVE-1999-0524, ICMP timestamp replies) that a product would triage once
+  and record with `CVE_STATUS`. The usual answer to the first group is to
+  follow the stable kernel releases.
+- **curl 8.19.0 (29), openssl 3.5.8 (19), glibc (14), expat (12), u-boot (8),
+  busybox (4)** are the user-space ones with the most. Several curl ones
+  concern features this device does not use (HTTP/2 server push, Negotiate,
+  wolfSSL); recording that would be `CVE_STATUS[...] = "not-applicable-config: ..."`
+  in a bbappend, after checking.
+- **libx11 is in an edge device** because Poky's `DISTRO_FEATURES` include
+  `x11` and `dbus` is then built with `dbus-launch`, which links libx11.
+  Removing `x11` from `DISTRO_FEATURES` would remove four unpatched CVEs and
+  a few packages, at the cost of rebuilding most of the distro. A real
+  product would use its own distro configuration without it.
+- **can-demo and can-utils have no CVEs** (no entries in the databases).
+
+None of these were fixed here: the point of this stage was to produce
+and read the report. Fixing would mean newer upstream versions (the
+Wrynose branch gets them over time; moving the kas pins to a newer 6.0.x
+point release picks them up) or triage with `CVE_STATUS`.
+
+### Why this matters: the EU Cyber Resilience Act
+
+The **Cyber Resilience Act** (CRA, Regulation (EU) 2024/2847) applies to
+"products with digital elements" sold in the EU, which includes an edge
+device like this one and the software on it. It entered into force on
+10 December 2024; manufacturers must report actively exploited
+vulnerabilities and severe incidents from **11 September 2026**, and the
+main requirements apply from **11 December 2027**. Among them:
+
+- products are placed on the market **without known exploitable
+  vulnerabilities**, and vulnerabilities found later are handled
+  "without delay", with security updates for the support period (in
+  general at least five years);
+- the manufacturer **identifies and documents the components**, including
+  an **SBOM** in a commonly used machine-readable format covering at least
+  the top-level dependencies. It goes into the technical documentation;
+  it does not have to be published.
+
+An SBOM per image and a CVE report per build are the raw material for
+that: they say what is in a given release and which known
+vulnerabilities apply. They do not make a product compliant on their own:
+someone has to triage the "unpatched" list (fix, update, or record why it
+does not apply, with `CVE_STATUS`), and the device has to be updatable,
+which the A/B updates of part 2 are for. (This is a summary for learning,
+not legal advice.)
+
+## 25. Pinning sources: SRCREV
+
+Until now can-demo was fetched with `file://can-demo/` from the working
+tree. Easy, but the image did not say which version of the app it had, and
+an uncommitted edit ended up in the build. The recipe now fetches the app
+with git, at a fixed commit:
+
+```bitbake
+SRC_URI = "git://github.com/dzulfikar08/edge-linux-can.git;protocol=https;branch=main;subpath=apps/can-demo \
+           file://can-demo@.service file://can-demo-can0.default"
+SRCREV = "da2515c14737b8865b53d61648b4666a6e90f8ad"
+PV = "0.1.0+git"
+S = "${UNPACKDIR}/can-demo"
+```
+
+- `git://...;protocol=https`: BitBake's git fetcher. It keeps a bare mirror
+  in `DL_DIR/git2/` and checks out `SRCREV` from it. The app lives in this
+  same repository, so the recipe fetches this repository from GitHub; in a
+  product the app would usually have its own repository.
+- A private fork without network access can use a local clone instead:
+  `git://${EDGE_REPO_DIR};protocol=file;...`, where `EDGE_REPO_DIR` is set in
+  `layer.conf` from `LAYERDIR` (`/repo` inside the kas container). That is
+  how the builds in the [build journal](build-journal.md) ran.
+- `branch=main`: the fetcher checks that `SRCREV` is on that branch.
+- `subpath=apps/can-demo`: only that directory is checked out, into
+  `${UNPACKDIR}/can-demo`.
+- **`SRCREV`** is the commit. BitBake never builds "whatever is on main"
+  unless you write `SRCREV = "${AUTOREV}"`, which asks the server on every
+  parse and makes builds unreproducible.
+- `PV = "0.1.0+git"`: BitBake appends the commit, so the package version
+  is `0.1.0+git0+da2515c147` (in `rootfs.manifest`, the SBOM, `opkg info`).
+
+Bumping the app is two commits: first the app change (pushed, so the
+fetcher can find it), then the recipe's `SRCREV` set to that commit
+(`git rev-parse HEAD`). If `Cargo.lock`
+changed, run `bitbake -c update_crates can-demo` and commit
+`can-demo-crates.inc` along with it: the crate list in the recipe has to
+match the lock file, since the build is offline.
+
+The trade-off: the source of a recipe is now in git history, not in your
+editor. To try an uncommitted change you either commit it, or use
+`devtool modify can-demo`, which points the recipe at a local checkout until
+`devtool reset`.
+
+## 26. CAN FD
+
+### Classic CAN and CAN FD
+
+Classic CAN (ISO 11898-1:2003) sends at most **8 data bytes** per frame at
+one bit rate, typically 125 kbit/s to 1 Mbit/s. **CAN FD** ("flexible data
+rate", ISO 11898-1:2015) changes two things:
+
+- **Up to 64 data bytes.** The 4-bit DLC field still has 16 values: 0 to 8
+  mean 0 to 8 bytes as before, 9 to 15 mean 12, 16, 20, 24, 32, 48, 64
+  bytes. So an FD frame of 10 bytes is not possible; it is padded to 12.
+- **A second, faster bit rate for the data phase**, if the frame has the
+  **BRS** (bit rate switch) bit set. Arbitration (the id) still runs at the
+  nominal rate, so every node agrees on who wins the bus; then the
+  transmitter switches to the data bit rate (here 2 Mbit/s, commonly up to
+  5 or 8 Mbit/s) for the payload and the CRC.
+
+FD frames carry an **FDF** bit (formerly EDL) that marks them as FD. A
+classic-only controller sees that bit as an error and destroys the frame
+with an error frame, so FD nodes and classic-only nodes cannot share a bus
+while FD frames are being sent. An FD controller, on the other hand, sends
+and receives classic frames as usual: one FD bus can carry both, which is
+what this project does (classic heartbeat, FD telemetry).
+
+### The SocketCAN FD API
+
+The kernel has a second frame struct for FD:
+
+```c
+struct canfd_frame {          /* 72 bytes, CANFD_MTU */
+    canid_t can_id;
+    __u8    len;              /* 0..64, one of the DLC lengths */
+    __u8    flags;            /* CANFD_BRS, CANFD_ESI, CANFD_FDF */
+    __u8    __res0, __res1;
+    __u8    data[64];
+};
+```
+
+and two rules:
+
+1. A `CAN_RAW` socket exchanges `canfd_frame`s only after
+   `setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &1, sizeof(int))`.
+   Without it, a program that reads 16 bytes never sees FD frames (the
+   kernel does not deliver them to that socket), which is why old classic
+   CAN programs keep working on a bus with FD traffic.
+2. With the option on, **`read()` returns 16 bytes for a classic frame and
+   72 bytes for an FD frame**; the size *is* the frame type. `write()` takes
+   either size. Writing a 72-byte frame needs an interface whose MTU is
+   `CANFD_MTU` (72) or more: a controller set up with `fd on` (72), or a
+   vcan (Linux 6.18 creates it with 2060, the CAN XL MTU, which also
+   carries FD; the guest's `vcan0` has that too). On a classic interface
+   (MTU 16) `write()` fails with `EINVAL`.
+
+In [`apps/can-demo/src/can.rs`](../apps/can-demo/src/can.rs):
+
+```rust
+#[repr(C)]
+struct RawCanFdFrame { can_id: u32, len: u8, flags: u8, _res0: u8, _res1: u8, data: [u8; 64] }
+
+// CanSocket::open: always ask for FD frames
+setsockopt(fd, SOL_CAN_RAW /* 101 */, CAN_RAW_FD_FRAMES /* 5 */, &1)
+
+// read into a 72-byte buffer; the length says which struct it is
+match n { 16 => classic, 72 => fd, _ => error }
+```
+
+The sender looks at `/sys/class/net/<iface>/mtu`: 72 or more means the
+interface carries FD, so it adds the 64-byte telemetry frame with `BRS` set;
+16 means classic only, so it sends just the heartbeat and logs
+`classic CAN only`. Same binary, either controller.
+
+### Setting up the controller
+
+```sh
+ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on
+ip link set can0 up
+ip -details link show can0
+#   can0: <NOARP,UP,LOWER_UP,ECHO> mtu 72 ...
+#   can <FD> state ERROR-ACTIVE ... bitrate 500000 ... dbitrate 2000000 ...
+#   (in QEMU: state STOPPED, see below)
+```
+
+`fd on` switches the controller to FD mode and the interface MTU to 72.
+`can-bitrate@.service` now runs
+[`/usr/libexec/can-up`](../layers/meta-edge/recipes-connectivity/can-setup/files/can-up),
+which reads `CAN_BITRATE` and `CAN_DBITRATE` from
+`/etc/default/can-bitrate-can0`. If the controller refuses `fd on` (the
+SJA1000 behind `kvaser_pci` has no FD), it logs that and sets up classic CAN,
+so the image works with either controller.
+
+On real hardware the data bit rate needs more care than in QEMU: the
+transceiver must support it, and the **transmitter delay compensation**
+(`tdcv`/`tdco` in `ip link`) and the sample points matter at 2 Mbit/s and
+above. QEMU ignores bit timing entirely.
+
+### In QEMU
+
+`kvaser_pci` became **`ctucan_pci`**, the CTU CAN FD IP core (an open-source
+FD controller from the Czech Technical University) on a PCI card; Linux's
+driver is `ctucanfd_pci` (in `can.cfg` since the first build). The card has
+two controllers and QEMU insists on a bus for each (`ctucan_connect_to_bus
+failed` otherwise, found on the first run): the first is on the bus bridged
+to the host (guest `can0`), the second on an empty bus (`can1`, unused). QEMU's
+`can-host-socketcan` bridge opens the host interface with
+`CAN_RAW_FD_FRAMES`, so FD frames cross it in both directions; host `vcan0`
+must have an MTU of at least 72 (here 2060).
+
+```
+-object can-bus,id=canbus0
+-object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0
+-object can-bus,id=canbus1
+-device ctucan_pci,canbus0=canbus0,canbus1=canbus1
+```
+
+One thing differs from hardware: `ip -details link show can0` says
+`state STOPPED`, not `ERROR-ACTIVE`, although frames flow. The Linux
+driver sets `STOPPED` when it starts the controller and switches to
+`ERROR-ACTIVE` on the controller's first fault-confinement interrupt; QEMU
+10.2's model of the core only raises receive, transmit and overrun
+interrupts (checked in `hw/net/can/ctucan_core.c`), so the state never
+changes. The tests accept `STOPPED` for this controller and check the
+traffic instead.
+
+### The DBC
+
+[`docs/can-demo.dbc`](can-demo.dbc) now describes the FD frames too: a
+64-byte message is declared with length 64, and the DBC attribute
+`VFrameFormat` (Vector's convention) marks it as `StandardCAN_FD`, so
+tools that read it send and expect an FD frame. Signals beyond byte 8 work
+like any other (`SG_ PatternLast : 504|8@1+`, bit 504 = byte 63).
+
+| Id | Name | Type | Sender | Content |
+|---|---|---|---|---|
+| 0x100 | EdgeHeartbeatVcan | classic, 8 | guest, vcan0 | Seq u32, "HBT1" |
+| 0x101 | EdgeHeartbeat | classic, 8 | guest, can0 | Seq u32, "HBT1" |
+| 0x200 | EdgeTelemetryFdVcan | FD+BRS, 64 | guest, vcan0 | Seq, "FDT1", UptimeMs u64, FramesRx u64, StartCount u32, pattern |
+| 0x201 | EdgeTelemetryFd | FD+BRS, 64 | guest, can0 | same |
+| 0x321 | HostPing | classic, 8 | host | "HOST", Count |
+| 0x322 | HostFdPing | FD+BRS, 64 | host | "HOSTFD01", Count, pattern |
+
+The pattern bytes (each byte = sequence number + position) let a receiver
+check that all 64 bytes crossed the bridge intact; can-demo counts frames
+where they don't as `fd_bad`.
+
+In the guest, `can0` in FD mode and both kinds of frames on it (own
+heartbeat and telemetry, the host's classic and FD frames):
+
+![Guest can0 in CAN FD mode](images/guest-canfd.png)
+
+On the host, `scripts/host-can.py` received the guest's frames over the
+bridge and decoded them with the DBC:
+
+![Host side of the bridge](images/host-canfd.png)
+
 ## Lessons from this build
 
 Each of these cost time during the build ([build-journal.md](build-journal.md)):
@@ -908,7 +1494,27 @@ From part 2 (read-only root and A/B updates):
     boots. This was avoided by design (the `/etc` overlay keeps the id),
     and the A/B test checks the id is the same after the update.
 
-## 22. Glossary
+From part 3 (tests, SBOM, CAN FD):
+
+13. **Check the release, not the tutorial.** Every guide says
+    `INHERIT += "cve-check"`; that class is gone in 6.0. `ls meta/classes*`
+    took one second and saved a failed parse.
+14. **A tool's numbers need reading before quoting.** sbom-cve-check's
+    "Patched" includes "this version was never affected", and its image
+    report includes recipes that are not installed. The headline numbers
+    were only meaningful after splitting them.
+15. **Emulators are not hardware.** QEMU's CTU CAN FD needs a bus for both
+    of its cores, and its model never reports the error-active state, so the
+    driver says `STOPPED` while frames flow. Both were found by the first
+    test run and confirmed in QEMU's source before changing the tests.
+16. **Test the fallback.** The image has to work on a classic-only
+    controller too (the BMS demo uses one); running the smoke test with
+    `CAN_DEV=kvaser` is what shows that `can-up` and can-demo fall back.
+17. **My test bugs, again.** All three failures of the first testimage run
+    were in the new test case (wrong path for RAUC's config, a regex without
+    multiline mode, an MTU assumption), none in the image.
+
+## 27. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -936,3 +1542,13 @@ From part 2 (read-only root and A/B updates):
 | mark-good / mark-bad | RAUC commands that tell the bootloader a slot works / does not |
 | overlayfs | writable upper directory stacked on a read-only lower one |
 | U-Boot environment | the bootloader's persistent variables, shared with Linux via `fw_setenv` |
+| ptest | a package's own test suite, built for and run on the target (`<pkg>-ptest`, `run-ptest`, `ptest-runner`) |
+| oeqa / testimage | oe-core's test framework / the task that boots an image and runs runtime tests against it |
+| SBOM | software bill of materials: every component, version, licence and source of a build (here SPDX 3.0) |
+| CVE / NVD | public identifier of a known vulnerability / the US database that describes which versions it affects |
+| VEX | machine-readable "affected or not, and why" statements for CVEs |
+| `CVE_STATUS` | recipe variable that records why a CVE is fixed or does not apply |
+| SRCREV | the exact source revision (git commit) a recipe builds |
+| CAN FD | CAN with up to 64 data bytes and an optional faster data-phase bit rate |
+| BRS | bit rate switch: the flag that makes an FD frame's data phase use the data bit rate |
+| `CAN_RAW_FD_FRAMES` | socket option that lets a CAN_RAW socket send and receive `canfd_frame` |

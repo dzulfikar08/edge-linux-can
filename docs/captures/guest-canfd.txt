@@ -1,0 +1,24 @@
+root@qemuarm64:~# ip -details link show can0
+5: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 72 qdisc pfifo_fast state UP mode DEFAULT group default qlen 10
+    link/can  promiscuity 0 allmulti 0 minmtu 72 maxmtu 72 
+    can <FD> state STOPPED (berr-counter tx 0 rx 0) restart-ms 100 
+	  bitrate 500000 sample-point 0.875
+	  tq 10 prop-seg 111 phase-seg1 63 phase-seg2 25 sjw 12 brp 1
+	  ctu_can_fd: tseg1 2..190 tseg2 1..63 sjw 1..31 brp 1..8 brp_inc 1
+	  dbitrate 2000000 dsample-point 0.740
+	  dtq 10 dprop-seg 18 dphase-seg1 18 dphase-seg2 13 dsjw 6 dbrp 1
+	  ctu_can_fd: dtseg1 2..94 dtseg2 1..31 dsjw 1..31 dbrp 1..2 dbrp_inc 1
+
+root@qemuarm64:~# candump -n 12 -T 8000 -td can0,101:7FF,201:7FF,321:7FF,322:7FF
+ (000.000000)  can0  321   [8]  48 4F 53 54 12 01 00 00
+ (000.000618)  can0  322  [64]  48 4F 53 54 46 44 30 31 89 00 00 00 89 8A 8B 8C 8D 8E 8F 90 91 92 93 94 95 96 97 98 99 …
+ (000.303896)  can0  201  [64]  3F 00 00 00 46 44 54 31 E4 F6 00 00 00 00 00 00 2F 01 00 00 00 00 00 00 01 00 00 00 00 …
+ (000.001650)  can0  101   [8]  3F 00 00 00 48 42 54 31
+ (000.201995)  can0  321   [8]  48 4F 53 54 13 01 00 00
+ (000.503214)  can0  321   [8]  48 4F 53 54 14 01 00 00
+ (000.001569)  can0  322  [64]  48 4F 53 54 46 44 30 31 8A 00 00 00 8A 8B 8C 8D 8E 8F 90 91 92 93 94 95 96 97 98 99 9A …
+ (000.294709)  can0  201  [64]  40 00 00 00 46 44 54 31 D6 FA 00 00 00 00 00 00 34 01 00 00 00 00 00 00 01 00 00 00 00 …
+ (000.000171)  can0  101   [8]  40 00 00 00 48 42 54 31
+ (000.301068)  can0  321   [8]  48 4F 53 54 15 01 00 00
+ (000.506409)  can0  321   [8]  48 4F 53 54 16 01 00 00
+ (000.004371)  can0  322  [64]  48 4F 53 54 46 44 30 31 8B 00 00 00 8B 8C 8D 8E 8F 90 91 92 93 94 95 96 97 98 99 9A 9B …
