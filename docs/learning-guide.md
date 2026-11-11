@@ -34,7 +34,13 @@ Contents
 24. [SBOM and CVE checking (and the EU Cyber Resilience Act)](#24-sbom-and-cve-checking)
 25. [Pinning sources: SRCREV](#25-pinning-sources-srcrev)
 26. [CAN FD](#26-can-fd)
-27. [Glossary](#27-glossary)
+27. [Debugging a device model: QEMU against the Linux driver](#27-debugging-a-device-model-qemu-against-the-linux-driver)
+28. [Carrying a patch in Yocto](#28-carrying-a-patch-in-yocto)
+29. [Upstreaming etiquette](#29-upstreaming-etiquette)
+30. [DISTRO_FEATURES: trimming a distro for a headless device](#30-distro_features-trimming-a-distro-for-a-headless-device)
+31. [Following a stable branch: layer updates](#31-following-a-stable-branch-layer-updates)
+32. [CVE triage: from a report to decisions](#32-cve-triage-from-a-report-to-decisions)
+33. [Glossary](#33-glossary)
 
 ---
 
@@ -1374,7 +1380,7 @@ ip link set can0 up
 ip -details link show can0
 #   can0: <NOARP,UP,LOWER_UP,ECHO> mtu 72 ...
 #   can <FD> state ERROR-ACTIVE ... bitrate 500000 ... dbitrate 2000000 ...
-#   (in QEMU: state STOPPED, see below)
+#   (QEMU before this project's patch: state STOPPED, see below)
 ```
 
 `fd on` switches the controller to FD mode and the interface MTU to 72.
@@ -1409,14 +1415,14 @@ must have an MTU of at least 72 (here 2060).
 -device ctucan_pci,canbus0=canbus0,canbus1=canbus1
 ```
 
-One thing differs from hardware: `ip -details link show can0` says
-`state STOPPED`, not `ERROR-ACTIVE`, although frames flow. The Linux
+One thing used to differ from hardware: `ip -details link show can0` said
+`state STOPPED`, not `ERROR-ACTIVE`, although frames flowed. The Linux
 driver sets `STOPPED` when it starts the controller and switches to
-`ERROR-ACTIVE` on the controller's first fault-confinement interrupt; QEMU
-10.2's model of the core only raises receive, transmit and overrun
-interrupts (checked in `hw/net/can/ctucan_core.c`), so the state never
-changes. The tests accept `STOPPED` for this controller and check the
-traffic instead.
+`ERROR-ACTIVE` on the controller's first fault-confinement interrupt;
+QEMU 10.2's model of the core never raised it. This project now carries a
+QEMU patch that does what the IP core does, and the tests require
+`ERROR-ACTIVE`: how that was found and fixed is
+[chapter 27](#27-debugging-a-device-model-qemu-against-the-linux-driver).
 
 ### The DBC
 
@@ -1514,7 +1520,405 @@ From part 3 (tests, SBOM, CAN FD):
     were in the new test case (wrong path for RAUC's config, a regex without
     multiline mode, an MTU assumption), none in the image.
 
-## 27. Glossary
+From part 4 (QEMU patch, layer update, CVE triage):
+
+18. **Three sources settle a device-model bug**: the driver (what it waits
+    for), the hardware's documentation or RTL (what the device does), the
+    model (what it does instead). Reading them took an hour; guessing would
+    have produced a patch that raised FCSI and still left `FAULT_STATE` at 0.
+19. **A disk at 75 % is a full disk for a toolchain rebuild.** rust-native,
+    cargo-native and libstd-rs need ~15 GB of work space at once. Build the
+    big ones alone first, stop bitbake with SIGINT (never kill the
+    container mid-compile), and run long builds with `setsid nohup`.
+20. **`%`-bbappends hit `-native` too.** Patching zlib for the device also
+    patched zlib-native and rebuilt the native toolchain;
+    `SRC_URI:append:class-target` was what was meant.
+21. **Prune caches only from a known-good state.** `sstate-cache-management
+    --remove-duplicated` keeps the *newest* object, which was the wrong one
+    after a misconfigured build; it cost a 2.5-hour rebuild.
+22. **Verify the claim in the output, not in the input.** A config
+    fragment that a Kconfig `select` overrides, and a CVE status that the
+    scanner also applied to another recipe with the same CPE, both looked
+    right until the resulting `.config` and report were read.
+
+## Part 4: fixing the emulator, trimming and updating the distro, triaging CVEs
+
+Part 3 left two things open: QEMU's CAN FD controller reported the wrong
+state, and the CVE report listed 703 unpatched CVEs in installed recipes
+with nobody having looked at them. Part 4 fixes the first in QEMU itself
+(chapters 27–29) and works through the second (chapters 30–32). What
+happened, with commands and timings: [build-journal.md, part 4](build-journal.md#part-4-qemu-patch-headless-distro-layer-update-cve-triage).
+
+## 27. Debugging a device model: QEMU against the Linux driver
+
+An emulated device is two programs that have to agree: the **device model**
+in QEMU (C code pretending to be the hardware's registers) and the
+**driver** in the guest kernel (written against the real hardware's
+datasheet). When they disagree, three sources settle it, in this order:
+
+1. **The driver** shows what it expects: which registers it reads, which
+   interrupts it enables, what state it starts in.
+2. **The hardware documentation** (datasheet, register map, and for an open
+   IP core, its RTL) shows what the real device does.
+3. **The model** shows what QEMU does. The bug is wherever the model
+   differs from (2) in something (1) depends on.
+
+Reading them, not guessing, took less time than any experiment would have.
+
+### The symptom
+
+`ip -details link show can0` said `can <FD> state STOPPED` while CAN FD
+frames went both ways. `STOPPED` is what Linux shows for a CAN interface
+that is down, so either the driver never saw the controller start, or it
+never heard about it.
+
+### The driver: what it waits for
+
+In `drivers/net/can/ctucanfd/ctucanfd_base.c` (the kernel source is in
+`build/tmp/work-shared/qemuarm64/kernel-source`):
+
+```c
+/* ctucan_chip_start() */
+int_ena = REG_INT_STAT_RBNEI | REG_INT_STAT_TXBHCI |
+          REG_INT_STAT_EWLI | REG_INT_STAT_FCSI;
+...
+/* Controller enters ERROR_ACTIVE on initial FCSI */
+priv->can.state = CAN_STATE_STOPPED;
+mode_reg |= REG_MODE_ENA;            /* enable the core */
+```
+
+So the driver enables the core and **waits for an interrupt**: FCSI,
+"fault confinement state changed". Its error interrupt handler then reads
+the new state from a register:
+
+```c
+/* ctucan_read_fault_state() */
+fs = ctucan_read32(priv, CTUCANFD_EWL);      /* EWL, ERP, FAULT_STATE in one word */
+if (FIELD_GET(REG_EWL_ERA, fs))  ... ERROR_ACTIVE (or WARNING, from REC/TEC)
+else if (FIELD_GET(REG_EWL_ERP, fs)) ... ERROR_PASSIVE
+else if (FIELD_GET(REG_EWL_BOF, fs)) ... BUS_OFF
+WARN(true, "Invalid error state");
+```
+
+Two things the model has to provide: the FCSI interrupt, and a sensible
+`FAULT_STATE` (the `ERA`/`ERP`/`BOF` bits).
+
+### The model: what QEMU does
+
+`hw/net/can/ctucan_core.c` in QEMU 10.2 (from the source tarball in
+`downloads/`): `grep int_stat.s.` finds only `txi`, `txbhci`, `rxi`,
+`rxfi` and `doi`, so no FCSI anywhere. Worse, `ctucan_mem_read()` has no
+`case` for the `EWL` word (offset `0x2c`) or `REC`/`TEC` (`0x30`): they read
+as 0, so even with an FCSI the driver would hit `"Invalid error state"`.
+The state is stored (`ewl_erp_fault_state` and `rec_tec` are even in the
+migration state); nothing sets or reads it.
+
+### The hardware: what the real core does
+
+The CTU CAN FD IP core is open source (VHDL, `gitlab.fel.cvut.cz/canbus/ctucanfd_ip_core`),
+so "what does the hardware do" has an exact answer:
+
+| File | Says |
+|---|---|
+| `src/can_core/fault_confinement_fsm.vhd` | the state machine resets to **bus-off** (`curr_state <= s_fc_bus_off`); bus-off goes to error-active only on `set_err_active`; `fcs_changed` is high whenever the state changes |
+| `src/memory_registers/memory_registers.vhd` | the CAN core's reset is "Input reset + Software Reset + **Active when disabled**": while `SETTINGS[ENA]` is 0 the node sits in bus-off with zero error counters |
+| `src/can_core/protocol_control_fsm.vhd` | after enabling, the core **integrates** (waits for 11 recessive bits); at the end, if it is bus-off, it pulses `set_err_active`, which also clears REC and TEC |
+| `src/interrupt_manager/int_manager.vhd` | `fcs_changed` sets `INT_STAT[FCSI]` |
+| `spec/.../CAN_FD_IP_Core.2.1.xml` (register map) | reset values: `EW_LIMIT` 96, `ERP_LIMIT` 128, `FAULT_STATE` = `BOF` |
+
+So on hardware: enable → (11 bit times) → error-active + FCSI. Exactly
+what the driver waits for.
+
+### The fix
+
+About 50 lines in `ctucan_core.c`
+([patch](../layers/meta-edge/recipes-devtools/qemu/files/0001-hw-net-can-ctucan-report-fault-confinement-state.patch)):
+reset values on `MODE[RST]`; when `ENA` goes 0→1 the node becomes
+error-active and FCSI is raised (immediately: the model has no bit timing,
+so integration takes no time); when `ENA` goes 1→0 it returns to bus-off;
+`EWL`/`ERP`/`FAULT_STATE` and `REC`/`TEC` become readable. What it does
+**not** do is just as deliberate: no invented bus errors, no writable
+limits (the driver never writes them), no change for anything the RTL
+does not show.
+
+The result, from the guest's kernel log
+([capture](captures/ctucan-fcsi.txt)):
+
+```
+can0: ctucan_err_interrupt: ISR = 0x00000010, rxerr 0, txerr 0, ...
+can0: state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE
+```
+
+`0x10` is bit 4, FCSI. The tests now require `ERROR-ACTIVE`, and a
+negative check stops the interface (`STOPPED`), starts it again
+(`ERROR-ACTIVE`) and counts one transition per start, which shows the state
+comes from the controller and not from the driver alone.
+
+A side effect worth knowing: the driver logs that interrupt with "err" in
+the text, and oe-core's `parselogs` test case flags every log line
+containing "error". The fix is a narrow ignore list for exactly that line
+([`parselogs-ignores-aarch64.txt`](../layers/meta-edge/lib/oeqa/runtime/cases/parselogs-ignores-aarch64.txt)),
+which parselogs only finds if the layer puts its `lib/` on bitbake's Python
+path (`addpylib ${LAYERDIR}/lib oeqa` in `layer.conf`).
+
+## 28. Carrying a patch in Yocto
+
+The QEMU that `runqemu` starts is not the host's: it is built by the
+recipe `qemu-system-native` (the system emulators; `qemu-native` builds the
+user-mode ones). To change it, the layer appends a patch to that recipe:
+
+```
+layers/meta-edge/recipes-devtools/qemu/
+  qemu-system-native_%.bbappend
+  files/0001-hw-net-can-ctucan-report-fault-confinement-state.patch
+```
+
+```bitbake
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+SRC_URI += "file://0001-hw-net-can-ctucan-report-fault-confinement-state.patch"
+```
+
+`do_patch` applies every `*.patch` in `SRC_URI` in order, with `-p1`, and
+fails on fuzz, so a patch that no longer applies after a version bump is an
+error, not a silent surprise.
+
+How the patch was made: unpack the same source (`tar -xJf
+downloads/qemu-10.2.0.tar.xz`), `git init` and commit the pristine file,
+change it, commit with a real message, then `git format-patch -1`. The
+message is the documentation: the bug, the evidence, what changed, what
+was tested. oe-core requires two header lines in every patch it carries:
+
+- **`Upstream-Status:`** with one of `Pending` (not sent yet),
+  `Submitted [where]`, `Backport [commit URL]` (taken from upstream),
+  `Denied`, `Inappropriate [reason]` (e.g. `[oe-specific]`). Here:
+  `Pending [prepared for qemu-devel, not sent yet: docs/upstream/]`.
+- **`Signed-off-by:`**, the Developer Certificate of Origin: you certify
+  you may submit this code under the project's licence.
+
+`devtool modify qemu-system-native` / `devtool finish` automates the same
+cycle (it checks out the source as a git tree in `workspace/`), worth using
+for anything larger than one file.
+
+Two costs to keep in mind. Every image depends on `qemu-system-native`
+for testing (`qemuboot.conf`, testimage), so changing the patch reran the
+image tasks; that rebuild took 25 minutes. And a carried patch is debt: on
+every QEMU version bump it must still apply and still be needed. That is
+the reason to send it upstream.
+
+## 29. Upstreaming etiquette
+
+A fix that lives only in your layer helps you once; upstream, it helps the
+next person who hits it, and you stop carrying it. Each project has its
+own rules; QEMU's are in `docs/devel/submitting-a-patch.rst`:
+
+- **Mail, not merge requests.** `git send-email` to `qemu-devel@nongnu.org`,
+  copying the maintainers that `scripts/get_maintainer.pl -f <file>` (from
+  `MAINTAINERS`) lists. For `hw/net/can/*` that is the "CAN bus subsystem
+  and hardware" entry: Pavel Pisa, Francisco Iglesias, Vikram Garhwal.
+- **Against current master**, not the version you build with. The patch was
+  rebased onto a sparse, shallow clone of master (`git clone --depth 1
+  --filter=blob:none --sparse`, then `git sparse-checkout set hw/net/can`),
+  8 MB instead of hundreds, and `git apply --check` shows it applies.
+- **`scripts/checkpatch.pl`** must be clean: 0 errors, 0 warnings here.
+- **Subject** `subsystem/file: what it does` (`hw/net/can/ctucan: report
+  fault confinement state, become error-active`); **body**: the problem,
+  the evidence (here: the driver code and the RTL), the change, how it was
+  tested. Notes that should not go into git history go under the `---`.
+- **One logical change per patch**; a series with a cover letter only when
+  there are several.
+- **A real identity.** The `Signed-off-by` address must be one you read
+  and answer from; a GitHub noreply address is fine for a GitHub commit but
+  not for a mailing list.
+- **Review is a conversation**: answer every comment, then send a `v2`
+  (`git format-patch -v2`) with a changelog under `---`, rather than
+  replying with fixes. Be patient: a week without an answer is normal, a
+  polite "ping" after two is fine.
+- **Tests** strengthen a patch. QEMU has qtests for the Xilinx CAN and
+  FlexCAN models but none for ctucan; one that enables the core and checks
+  `FAULT_STATE` and `INT_STAT.FCSI` is the obvious follow-up.
+
+Everything needed is prepared in [docs/upstream/](upstream/README.md); it
+was deliberately **not sent**, because sending is a public act in your
+name that you decide on.
+
+## 30. DISTRO_FEATURES: trimming a distro for a headless device
+
+`DISTRO_FEATURES` is the distro-wide list of capabilities that recipes
+consult when deciding what to build and how: `x11`, `wayland`, `opengl`,
+`bluetooth`, `wifi`, `systemd`, `ptest`, ... A recipe asks with
+`bb.utils.contains('DISTRO_FEATURES', 'x11', ...)`, usually to turn a
+`PACKAGECONFIG` option on, to add a dependency, or to skip itself entirely
+(`REQUIRED_DISTRO_FEATURES = "x11"` in libx11's recipe family makes them
+unbuildable without it).
+
+Poky enables almost everything (oe-core's `DISTRO_FEATURES_DEFAULTS`):
+
+```
+acl alsa bluetooth debuginfod ext2 ipv4 ipv6 wifi xattr nfs zeroconf pci 3g
+nfc x11 vfat seccomp pulseaudio gobject-introspection-data ldconfig opengl
+ptest multiarch wayland vulkan
+```
+
+That is right for a reference distro and wrong for a CAN gateway with no
+screen, sound or radio. The symptom here was libx11 in the image: `dbus`
+builds `dbus-launch` with X11 support when `x11` is a distro feature, and
+pulls `libx11-6`, `libxcb1`, `libxau6`, `libxdmcp6` into a headless device,
+plus their CVEs into its report. The fix is one line in the kas file:
+
+```yaml
+DISTRO_FEATURES:remove = "x11 wayland opengl vulkan pulseaudio gobject-introspection-data alsa bluetooth wifi nfc 3g"
+```
+
+What to keep was decided feature by feature: `ptest` (can-demo's on-device
+tests), `pci` (the CAN controllers are PCI devices in QEMU), `seccomp`
+(systemd sandboxing), `acl`/`xattr`, `ipv4`/`ipv6`, `vfat` (the boot
+partition), the rest because they cost nothing here. Before removing
+anything that might touch the kernel, check:
+`grep -rn DISTRO_FEATURES meta/recipes-kernel/linux/` showed only `ptest`
+adds kernel options (test drivers such as `scsi_debug`, `gpio-mockup`,
+`nft_test`). That is worth knowing: the product kernel carries test drivers
+because the distro has `ptest`. A product build would keep ptest for a
+test image only, through a separate distro or `DISTRO_FEATURES:remove` in
+the product configuration.
+
+The cost: `DISTRO_FEATURES` is part of the signature of every recipe that
+reads it, so changing it rebuilds a large part of the tree (here together
+with a layer update: 2,700 of 5,800 tasks). Do it early in a project.
+`bitbake -p` after the change showed 369 recipes skipped instead of 119:
+the X11, Wayland and Mesa recipes that now refuse to build. Afterwards the
+image manifest lost exactly the four X11 libraries (130 → 126 packages).
+
+## 31. Following a stable branch: layer updates
+
+A Yocto LTS release gets point releases (6.0.1, 6.0.2, ...) roughly every
+few months, but fixes land on the release branch (`wrynose` for oe-core,
+meta-yocto and meta-openembedded; `2.18` for bitbake) continuously. Pinning
+to a point release's tag is reproducible; following the branch head gets
+security fixes sooner. Either way the pin is a commit hash in the kas file,
+and updating it is a deliberate step:
+
+```sh
+git ls-remote https://git.openembedded.org/openembedded-core refs/heads/wrynose 'refs/tags/yocto-6.0*'
+git -C work/openembedded-core log --oneline <old>..<new> | grep -iE 'cve|upgrade|linux-yocto'
+```
+
+On 2026-11-11 the newest tag was still `yocto-6.0.4`, and the branch was 83
+commits ahead in oe-core: openssl 3.5.8 → 3.5.9, glibc 2.43 stable-branch
+updates, util-linux 2.41.6, linux-yocto 6.18.52 → 6.18.54, CVE patches for
+curl, expat, u-boot, libpcre2 and others. meta-yocto had one commit (the BSP
+kernel bump), bitbake one (a parser fix); meta-openembedded and meta-rauc
+had not moved.
+
+The kernel can be newer still. linux-yocto's maintainer merges each 6.18
+stable release into the `v6.18/standard/base` branch of
+`git.yoctoproject.org/linux-yocto` and bumps `yocto-kernel-cache`; oe-core
+picks up those pairs later. On 2026-11-11 the branch had 6.18.59, oe-core
+6.18.54. A bump commit (`git show 5cb259d380` in oe-core) changes exactly
+three values, which a bbappend can override:
+
+```bitbake
+SRCREV_machine:qemuarm64 = "0aa9c16e54e9a318d97bae25e0082d7807186232"   # Merge tag 'v6.18.59'
+SRCREV_meta = "cf1eb35154969907fb08e980fe6d1881c97d6a97"                # kver: bumping to v6.18.59
+LINUX_VERSION = "6.18.59"
+```
+
+This uses the maintainer's own integration (the same pair the next oe-core
+bump will carry), not an arbitrary kernel.org tag. Remove the override once
+oe-core catches up.
+
+What the update cost here was disk, not CPU: the new openssl-native changed
+the inputs of rust-native, cargo-native and libstd-rs, and those three
+together need ~15 GB of work space before `rm_work` reclaims it. On a
+nearly full build disk, build them first and one at a time
+(`bitbake rust-native`, then `cargo-native`, then `libstd-rs`), and never
+stop a build with `docker stop` in the middle of a compile: the half-written
+objects survive and break the next link
+([journal, section 26](build-journal.md#26-the-layer-update-build-disk-space-the-hard-way)).
+
+## 32. CVE triage: from a report to decisions
+
+Chapter 24 produced the report. Triage turns its "Unpatched" list into
+decisions that someone can check later. Each CVE ends up in one of a few
+places, and oe-core has a status keyword for each
+(`meta/conf/cve-check-map.conf`):
+
+| Status (CVE_STATUS keyword) | Report category | Means | Evidence needed |
+|---|---|---|---|
+| `fixed-version` | Patched | the shipped version already has the fix, the database range is wrong | upstream release notes or commit in the shipped version |
+| `cpe-stable-backport` | Patched | the fix is in the stable-branch commit we build | the branch commit |
+| `backported-patch` / a patch with `CVE:` | Patched | we carry the upstream fix as a patch | `Upstream-Status: Backport [commit URL]` |
+| `version-not-in-range` | Patched | (set by the scanner) version outside the affected range | |
+| `not-applicable-config` | Ignored | the vulnerable code is not built in this configuration | the config option and where it is set |
+| `not-applicable-platform` | Ignored | the vulnerable code is for another OS/arch/vendor kernel | the platform and why |
+| `disputed`, `upstream-wontfix`, `cpe-incorrect` | Ignored | the CVE itself is contested or misattributed | upstream statement (link) |
+| `version-in-range`, `unpatched` | Unpatched | affected, not addressed | (the to-do list) |
+
+### The workflow used here
+
+1. **Update first.** A newer stable point release or branch head removes
+   whole categories at once (chapter 31). Here: 703 → 157 unpatched entries
+   in installed recipes, without a single manual decision; triage then
+   took it to 133.
+2. **Kernel: use the tooling.** oe-core wrynose deleted its generated
+   kernel exclusion list (`b737508e63 linux-yocto: remove CVE exclusion list,
+   sbom-cve-check does this itself`). sbom-cve-check does two things for the
+   kernel: it reads the kernel.org CNA's per-branch ranges (an entry says
+   e.g. "6.18.57 ≤ 6.18.* unaffected", so 6.18.54 is affected and 6.18.59 is
+   not), and, with `SPDX_INCLUDE_COMPILED_SOURCES:pn-linux-yocto = "1"`, it
+   compares each CVE's `programFiles` with the list of source files this
+   kernel compiled; if none of them were compiled the CVE becomes
+   `not-applicable-config` ("Source code not compiled by config").
+   `scripts/kernel-cve-triage.py` sorts what is left by the fix version
+   the CNA lists, which says what to do next: move to that stable release,
+   wait, or triage by hand.
+3. **User space: one package at a time, highest score first**, reading the
+   project's own advisory, not only NVD's summary. For curl that is
+   `https://curl.se/docs/vuln.json` (machine-readable ranges) and the
+   per-CVE page (which names the TLS backend, protocol or option the flaw
+   needs). Compare with what the build actually contains: for curl,
+   `supported_protocols` and `supported_features` in `libcurl.pc`; for
+   U-Boot, `build/.config` after `bitbake -c configure u-boot` plus the
+   `Makefile`/`#ifdef` that guards the vulnerable function.
+4. **Record the decision where the build reads it**: `CVE_STATUS[CVE-…] =
+   "<keyword>: <reason>"` in a bbappend, the reason short and checkable (the
+   option name, the file). The status ends up in the SPDX VEX data, so the
+   SBOM carries the justification with it.
+5. **If the code is built and affected, fix it**: take the upstream commit,
+   check it applies to the shipped version, carry it with `CVE:` and
+   `Upstream-Status: Backport [...]` headers. If the feature is not needed,
+   switching it off is also a fix (a U-Boot config fragment here).
+6. **Leave the rest visibly open.** An honest report has an "untriaged"
+   list. Marking something not-applicable without evidence only moves the
+   risk out of sight.
+
+### What is *not* a reason
+
+- "Not installed in this image": `CVE_STATUS` belongs to a recipe, and the
+  recipe may be installed by another image. Record image-level reasoning in
+  the triage document, not in `CVE_STATUS`.
+- "Low score" or "needs local access": that is risk assessment, which is
+  useful, but it does not make the code absent.
+- "Nobody would do that": the CVE's precondition must be checked, not
+  assumed.
+
+Two traps met here:
+
+- **Recipes that share a CPE share a status.** `util-linux-libuuid` builds
+  only libuuid, so a `mount` CVE cannot be in it; but it has the same CPE as
+  `util-linux` (`util-linux:2.41.6`), and sbom-cve-check applied the
+  not-applicable statement set on libuuid to util-linux too, which does
+  build `mount`. The status was removed again. Always look at the report
+  *after* the rebuild for every recipe with the same product name.
+- **Check the resulting config, not the fragment.** `# CONFIG_VIDEO_BMP_RLE8
+  is not set` in a U-Boot fragment changed nothing, because another option
+  `select`s it; merge_config's log only shows what was requested. `grep` the
+  final `.config` (and, for a security claim, the object files or `nm` of
+  the binary).
+
+The decisions for this image, with links, are in
+[docs/cve/README.md](cve/README.md).
+
+## 33. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -1534,6 +1938,12 @@ From part 3 (tests, SBOM, CAN FD):
 | native / nativesdk / target | built for the build host / for an SDK host / for the device |
 | kas | YAML front-end that sets up layers and runs bitbake |
 | runqemu | script that boots a built image in QEMU |
+| CPE | Common Platform Enumeration: the product identifier (`vendor:product:version`) CVE databases use; recipes set it with `CVE_PRODUCT` |
+| VEX | Vulnerability Exploitability eXchange: per-CVE status statements (affected, not affected and why, fixed) carried in the SBOM |
+| `CVE_STATUS` | a recipe's recorded decision about one CVE (`"<keyword>: <reason>"`), exported as VEX |
+| kernel.org CNA | the CVE Numbering Authority for Linux; its records list affected and fixed versions per stable branch and the affected source files |
+| FCSI | CTU CAN FD's "fault confinement state changed" interrupt (INT_STAT bit 4) |
+| `Upstream-Status` | required header of every patch carried in oe-core style layers: Pending, Submitted, Backport, Denied, Inappropriate |
 | wic / `.wks` | tool and kickstart file that build a partitioned disk image |
 | slot | one of the places a component (here the rootfs) can be installed: A or B |
 | bundle (`.raucb`) | signed RAUC update file: images + manifest + signature |

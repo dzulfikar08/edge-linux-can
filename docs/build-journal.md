@@ -709,3 +709,228 @@ falls back to classic CAN on its `kvaser_pci` controller (tested above with
 Disk after part 3: `build/` 31 GB (of which 8.8 GB CVE databases),
 `downloads/` 9.5 GB, `sstate/` 5.8 GB, `work/` 0.4 GB: this project
 ~47 GB, 28 GB free on the 84 GB volume.
+
+# Part 4: QEMU patch, headless distro, layer update, CVE triage
+
+2026-11-11, from 14:20 (WIB) to the next morning. Goals: make QEMU's CTU CAN FD
+model report ERROR-ACTIVE (and prepare the fix for upstream QEMU), then reduce
+the CVE report legitimately. Concepts: [learning-guide.md chapters 27–32](learning-guide.md#part-4-fixing-the-emulator-trimming-and-updating-the-distro-triaging-cves).
+
+## 24. The QEMU CTU CAN FD model
+
+Read, in this order (all commands from the build disk):
+
+```sh
+tar -xJf downloads/qemu-10.2.0.tar.xz --wildcards '*/hw/net/can/*'
+grep -n 'FCSI\|CAN_STATE\|ctucan_read_fault_state' \
+    build/tmp/work-shared/qemuarm64/kernel-source/drivers/net/can/ctucanfd/ctucanfd_base.c
+git clone --depth 1 https://gitlab.fel.cvut.cz/canbus/ctucanfd_ip_core.git   # RTL, b76a8888
+```
+
+| Source | Finding |
+|---|---|
+| Linux `ctucan_chip_start()` | enables FCSI, sets `CAN_STATE_STOPPED`, "Controller enters ERROR_ACTIVE on initial FCSI", then sets `MODE[ENA]` |
+| Linux `ctucan_read_fault_state()` | reads `EWL` word (0x2c): `ERA`/`ERP`/`BOF` bits; none set → `WARN(true, "Invalid error state")` |
+| QEMU `ctucan_core.c` | FCSI never set; no `case` for 0x2c or 0x30 in `ctucan_mem_read()`, so `FAULT_STATE` and `REC/TEC` read as 0 |
+| RTL `fault_confinement_fsm.vhd` | reset state `s_fc_bus_off`; bus-off → error-active only on `set_err_active`; `fcs_changed` on every change |
+| RTL `memory_registers.vhd` | core reset "Active when disabled" (`SETTINGS[ENA]=0` → bus-off) |
+| RTL `protocol_control_fsm.vhd` | end of integration while bus-off → `set_err_active` (clears REC/TEC) |
+| register map XML | `EW_LIMIT` 96, `ERP_LIMIT` 128, `FAULT_STATE` reset = BOF |
+| Datasheet v2.7.0 §2.5, §2.12.2 | "During bus integration CTU CAN FD is bus-off ... can be determined by FCS interrupt"; FCSI "upon any Fault confinement state change (even bus-off to error-active)" |
+
+The patch (~50 lines) was written once, as a script that edits the file
+(`qemu-upstream/edit_ctucan.py`), and applied to both QEMU 10.2.0 (for
+Yocto) and QEMU master (for upstream). QEMU's `scripts/checkpatch.pl`:
+0 errors, 0 warnings.
+
+### Build 8 and tests
+
+| Run | Time | Result |
+|---|---|---|
+| build 8 (qemu-system-native + images, SPDX, CVE scan) | 25 min | succeeded; 118 of 6,779 tasks ran (the image tasks depend on qemu-system-native) |
+| smoke 15, ctucan | 3 min | 16/17: the new negative check failed, see below |
+| smoke 16, ctucan | 3 min | **17/17**, host checks pass |
+| smoke 17, kvaser | 3 min | 16/16 guest, 1 host check failed: FD frames on vcan0 from another program |
+| smoke 18, kvaser | 3 min | **16/16**, host checks pass (bus quiet) |
+| testimage 3 | 5 min | 2 failed: `parselogs` and `test_bridge_both_directions` |
+| testimage 4 | 5 min | parselogs still failed |
+| testimage 5 | 5 min | **20 passed, 6 skipped, 0 failed** |
+| A/B 3 | 13 min | **24/24** (791 s) |
+
+Problems, all in the tests, none in the fix:
+
+1. **The negative check's parsing (smoke 15).** `ip -details link show can0 | grep -o 'state [A-Z-]*'`
+   also matched the link's operstate (`state DOWN`, `state UP`), and Linux
+   6.18 logs `state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE`,
+   not `STOPPED to ERROR_ACTIVE`. Fixed the regexes; the behaviour was right
+   (two transitions, `ISR = 0x00000010`).
+2. **A shared bus (smoke 17, testimage 3).** Another program was sending CAN FD
+   frames on host `vcan0` (ids 0x201, 0x322, 0x18DAF1A0: 864 frames of 0x201 in
+   one run). The kvaser check "no FD frames from the classic controller"
+   cannot tell them apart; it passed when rerun on a quiet bus. The bridge
+   test in `edge_can.py` now only counts frames with its own payload markers
+   (`HOST`, `HOSTFD01`).
+3. **parselogs (testimage 3, 4).** The driver logs the FCSI as
+   `ctucan_err_interrupt: ISR = 0x00000010 ...`, which contains "err".
+   oe-core's parselogs reads extra ignore lists
+   `parselogs-ignores-<candidate>.txt` through `importlib.resources`, i.e.
+   through the Python import path, and meta-edge's `lib/` was not on it:
+   testimage finds test case *files* by scanning layers, data files it does
+   not. `addpylib ${LAYERDIR}/lib oeqa` in `layer.conf` fixed it.
+
+Evidence: [captures/ctucan-fcsi.txt](captures/ctucan-fcsi.txt).
+
+## 25. Upstream submission prepared
+
+On a sparse, shallow clone of QEMU master on the build disk (8 MB checked
+out, `git sparse-checkout set hw/net/can ...`):
+
+```sh
+git apply --check docs/upstream/0001-*.patch      # clean on master 29760efaf9 (v11.2.0-rc0)
+perl scripts/checkpatch.pl docs/upstream/0001-*.patch   # 0 errors, 0 warnings
+perl scripts/get_maintainer.pl -f hw/net/can/ctucan_core.c
+```
+
+`get_maintainer.pl` refuses to run outside a "QEMU source tree" (it checks
+for `COPYING`, `Makefile`, `linux-user/`, `system/`, ...): adding those
+directories to the sparse checkout was enough.
+
+After the user approved submitting it (2026-11-11 evening), the patch was
+raised from draft to v1:
+
+| Step | Result |
+|---|---|
+| commit message rewritten in QEMU style, citing the datasheet (v2.7.0 §2.5, §2.12.2, COMMAND[ERCRST]), the RTL and the Linux driver, with links | |
+| identity: `Dzulfikar Ats Tsauri <your-real-address>` set with `git config` in the QEMU clone only (QEMU's DCO needs a real address) | |
+| shallow clone of master (213 MB), `git am`, `configure --target-list=aarch64-softmmu --disable-docs` | meson comes from QEMU's bundled wheels |
+| `ninja qemu-system-aarch64` | 3.6 min, 2,307 steps, no warnings in ctucan |
+| [docs/upstream/boot-test.py](upstream/boot-test.py) with the patch | **9/9** (first attempt failed: the host has no libslirp, so `-netdev user` does not exist; the test uses `-nic none`) |
+| same, master without the patch (incremental rebuild of one file) | 6/9: state STOPPED, frames pass: the bug, reproduced on master |
+| `xlnx-can-test`, `xlnx-canfd-test` | 5/5, 3/3 (no ctucan qtest exists; flexcan's builds only for 32-bit `arm`) |
+
+Result and the exact `git send-email` command: [upstream/SEND.md](upstream/SEND.md).
+Nothing was sent.
+
+## 26. The layer update: build disk space, the hard way
+
+Changes, all in one build to rebuild once:
+
+| What | Before | After |
+|---|---|---|
+| openembedded-core | `0f03c732` (yocto-6.0.4) | `2285da08` (wrynose head, +83 commits) |
+| meta-yocto | `7c25b111` (yocto-6.0.4) | `79b6d870` (+1) |
+| bitbake | `51fd94a6` (yocto-6.0.4) | `6e260eb6` (2.18 head, +1) |
+| meta-openembedded, meta-rauc | wrynose heads | unchanged |
+| linux-yocto | 6.18.52 | **6.18.59** (linux-yocto branch head, bbappend) |
+| openssl | 3.5.8 | 3.5.9 |
+| glibc | 2.43+git `9cda6fc…` era | 2.43+git `562cd7badd` |
+| util-linux | 2.41.5 | 2.41.6 |
+| libpcre2 | 10.47 | 10.47+git `c084f99ae0` |
+| curl, expat, u-boot, busybox | 8.19.0, 2.8.3, 2026.01, 1.37.0 | same versions, more CVE patches from oe-core |
+| DISTRO_FEATURES | poky defaults | minus `x11 wayland opengl vulkan pulseaudio gobject-introspection-data alsa bluetooth wifi nfc 3g` |
+
+`bitbake -p`: 369 recipes skipped (was 119): the graphics stack now refuses
+to build. 5,794 tasks in the build.
+
+What went wrong, in order:
+
+| Run | What happened | Free space |
+|---|---|---|
+| build 9 | free space fell from 24 to 10 GB in minutes: rust-native, cargo-native and libstd-rs (the new openssl-native changes their inputs) built in parallel, 14 GB of work dirs that `rm_work` only removes when each recipe finishes. Stopped by me with `docker stop` at the 10 GB guard. | 8.8 GB |
+| build 9b | `gcc-cross` link failed: `undefined reference to fancy_abort`. The `docker stop` had interrupted its `do_compile`; `make` treated the half-written archive as up to date. Fix: `bitbake -c clean` every recipe whose compile/configure the stop interrupted. | |
+| build 9c | 4 parallel tasks; still reached the guard (cargo-native) | 11 GB |
+| stage 1 | only `rust-native cargo-native libstd-rs gcc-cross-aarch64`: the harness ended my shell after 90 min while bitbake kept running in the container without a log; hard stop at 6 GB during rust-native's install/package | 6 GB |
+| (decision) | rust-native alone needs ~8–9 GB transiently on top of its work dir, so a 10 GB guard was impossible on this disk. Asked; the user allowed a 5 GB stop for this rebuild. | |
+| build 9e | 5 GB reached (a monitor script with `pkill -f` killed itself, the second time I made that mistake; used PIDs afterwards). Stopped **gracefully**: one SIGINT to the bitbake client in the container lets running tasks finish, so nothing is half-built. | 4 GB |
+| serial | `bitbake rust-native`, then `cargo-native`, then `libstd-rs`, each alone: 15 min total, free space back to 18 GB | 18 GB |
+| build 9g | **succeeded**, 2,715 tasks run, 149 min | min 5 GB |
+
+Lessons: on a nearly full disk, build the few huge recipes first and alone;
+stop bitbake with SIGINT, never by killing its container; run builds with
+`setsid nohup` so nothing outside can end them.
+
+## 27. CVE triage round, and an sstate mistake
+
+The triage (section 28) produced a zlib backport, a U-Boot config
+fragment and CVE_STATUS entries. Building them:
+
+| Run | What happened |
+|---|---|
+| build 10 | the zlib bbappend (`zlib_%.bbappend`) also applies to **zlib-native**. Patching it changed the inputs of every native recipe that links zlib, including the Rust and GCC toolchains and the kernel's host tools, which all started rebuilding. Hit the 10 GB guard; graceful stop. |
+| sstate prune | `scripts/sstate-cache-management.py --remove-duplicated` (allowed by the user, cache only): sstate 11 → 5.1 GB. |
+| build 10b | still rebuilding the toolchain: I found the zlib-native cause and restricted the patch to `SRC_URI:append:class-target`. Cleaned the stale work dirs. |
+| build 10c | **still** rebuilding the toolchain. Cause: my prune. |
+| build 11 | full toolchain rebuild, serial heavy recipes first (rust-native 47 s, cargo-native 5 min, libstd-rs 6 min, gcc-cross from sstate, kernel 14 min), then the rest: 51 min; succeeded, min. 12 GB free |
+| U-Boot check | `bitbake -c compile u-boot` + `nm`: `CONFIG_VIDEO_BMP_RLE8=y` **still set**: `VIDEO_LOGO` selects it. Disabling `VIDEO_LOGO` too fails to link (`__splash_u_boot_logo_begin`). Final fragment: `# CONFIG_VIDEO is not set`; no `drivers/video` objects, no `video_bmp`/`rle8` symbols |
+| build 12 | U-Boot without video, images, SPDX, CVE scan: 7 min |
+| build 13 | after removing the util-linux-libuuid status (section 28): SPDX and image tasks only, 23 min; free space dipped to 8 GB during the four image CVE scans (test leftovers on the disk), below the 10 GB guard; no compiles were running, so it was not stopped |
+
+**The sstate mistake.** `--remove-duplicated` keeps, for each recipe, task
+and architecture, the *newest* sstate object and deletes the others. It
+does not know which signatures the current configuration needs. I ran it
+right after build 10, which had just written sstate objects for many native
+recipes under the wrong signature (the zlib-native one). Those were the
+newest, so the script kept them and deleted the correct objects from build 9g.
+When the configuration went back to the right signature, its objects were
+gone and the toolchain had to be rebuilt: about 2.5 hours, and a second
+round of disk-space trouble.
+
+How to avoid it:
+
+- Prune only from a known-good state: after a successful build of the
+  configuration you want to keep, and before changing anything.
+- Prefer `--stamps-dir build/tmp/stamps` over `--remove-duplicated`: it keeps
+  exactly the objects the build directory's stamps reference.
+- Always read the dry run's list, not only its count (`-n -v`).
+- Think about `-native` before writing a `%`-bbappend for a library that
+  every tool links: `SRC_URI:append:class-target` if only the device needs it.
+
+
+## 28. The triage
+
+Full decisions with evidence and links: [cve/README.md](cve/README.md).
+Summary of what was looked at and how:
+
+| Recipe | Looked at | Outcome |
+|---|---|---|
+| u-boot (8) | `build/.config` after `bitbake -c configure u-boot`, `net/Makefile`, `#ifdef`s, callers of the vulnerable functions | 7 not built (`IP_DEFRAG`, `CMD_NFS`, `NET_LWIP`, `CMD_DHCP6`/`IPV6`, `FS_SQUASHFS`, `BOOTMETH_ANDROID` all off); 1 built and reachable (RLE8 BMP via PXE menu backgrounds): video stack disabled with a config fragment |
+| curl (28) | `https://curl.se/docs/vuln.json` and per-CVE pages; `libcurl.pc` (`supported_protocols`, `supported_features`) and `curl-config --ssl-backends` | all 28 affect 8.19.0 per curl; 8 need wolfSSL, GnuTLS+WebSockets, IMAP, TFTP, libssh2 or GSS-API, none built; CVE-2026-92392 (High) affected and its fix does not apply to 8.19.0 |
+| zlib (2) | NVD record → upstream commit; `patch --dry-run` on zlib-1.3.2 | backported (target only) |
+| linux-yocto, old entries (13) | `kernel-build-artifacts/.config`, `grep` in the kernel source | 6 settled (RHEL-only, x86-only, SMC, ROSE, JFS, NVMe), 7 left |
+| util-linux-libuuid (1) | recipe `EXTRA_OECONF` | status set, then **withdrawn**: same CPE as util-linux, so the scanner applied it to util-linux too |
+| oe-core master | `git log origin/master --grep=<CVE>` for every open CVE | fixed there only by upgrades (curl 8.23.0, expat 2.10.0, zlib 1.4), nothing to cherry-pick |
+
+| | Before | After update | After triage |
+|---|---|---|---|
+| Unpatched, installed recipes | 703 | 157 | **133** |
+| of which linux-yocto | 594 | 96 | 90 |
+
+## 29. Tests on the final images
+
+| Test | Time | Result |
+|---|---|---|
+| smoke, ctucan (build 12 images) | 140 s | **17/17**, host 2/2 |
+| smoke, kvaser (build 12 images) | 134 s | **16/16**, host 2/2 |
+| testimage (incl. ptest: can-demo 13 Rust tests) | 152 s | **20 passed, 6 skipped, 0 failed** |
+| A/B (U-Boot without video, both slots, rollback) | 567 s | **24/24** |
+| smoke, ctucan (build 13 images, rebuilt from the same packages) | ~2.5 min | **17/17**, host 2/2 |
+
+U-Boot without `CONFIG_VIDEO` still prints `Out: serial,vidconsole` (the
+default environment names `vidconsole`); the console multiplexer skips the
+missing device and the serial console works as before.
+
+## 30. Timings and disk, part 4
+
+| Step | Time |
+|---|---|
+| reading driver, model, RTL, datasheet; writing the patch | ~1 h |
+| build 8 (QEMU patch) | 25 min |
+| task 1 tests (smoke ×4, testimage ×3, A/B) | ~45 min |
+| layer update + headless distro: builds 9 … 9g | 15:46 → 21:46 (6 h, of which 149 min build 9g; the rest was disk trouble) |
+| triage round: builds 10 … 13, incl. the toolchain rebuild after the sstate mistake | 21:56 → 01:06 (3 h) |
+| final tests | 25 min |
+
+Disk: free space before part 4 was 23 GB (84 GB volume); the minimum during
+the builds was 3–4 GB (within the user's 5 GB exception, see section 26);
+after part 4: 19 GB free. The sstate cache was pruned once (11 → 5.1 GB,
+section 27). `build/` holds 8.8 GB of unpacked CVE databases.

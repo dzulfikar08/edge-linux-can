@@ -81,15 +81,19 @@ controllers. ptest runs in a separate test image, not in the product.
 
 Still open:
 
-1. **Triage the CVE report.** 735 unpatched entries, 594 of them kernel.
-   Move the kas pins to the newest Wrynose point release (and 6.18 stable
-   kernel) and rerun; then go through the user-space list (curl, openssl,
-   glibc, expat, u-boot, busybox) and record decisions with `CVE_STATUS`
-   in bbappends, so "unpatched" means "needs work" again.
-2. **A distro without `x11`.** Poky's `x11` distro feature pulls libx11
-   into this headless image through `dbus`. A small distro config of our own
-   (`DISTRO = "edge"`, based on poky, without x11/wayland/opengl/vulkan)
-   would remove it and shrink the image; it means rebuilding most packages.
+1. **CVE triage: done (2026-11-12), with a backlog.** Layers moved to the
+   wrynose heads, kernel to 6.18.59, and the user-space list triaged with
+   `CVE_STATUS`, a zlib backport and a U-Boot config change: 703 → 133
+   unpatched in installed recipes ([cve/README.md](cve/README.md)). Still
+   open there: **curl ≥ 8.20.2** (20 CVEs, among them CVE-2026-92392, rated
+   High by curl; a bbappend with a newer curl, or wait for wrynose),
+   openssl 3.5.10, expat 2.10.0, busybox awk/ash, acl/attr, and 34 kernel
+   CVEs fixed in 6.18.60–63 (next linux-yocto bump). Redo the triage when
+   the databases are bumped.
+2. **A distro without `x11`: done (2026-11-11)** with
+   `DISTRO_FEATURES:remove` in the kas file rather than a distro of our own.
+   A real `DISTRO = "edge"` would still be cleaner, and is where `ptest`
+   should go away for the product (it adds test drivers to the kernel).
 3. **Fail the build on new critical CVEs**: a small check after
    `do_sbom_cve_check` that compares the report with an accepted list.
 4. **Run the CVE scan on a schedule**, not only on builds: the databases
@@ -122,6 +126,11 @@ Still open:
 2. **zephyr-bms-can's edge demo** still boots its own older copy of the image
    (kvaser, classic). Refreshing that copy would show the new image against
    the BMS; the classic fallback it would need is tested here.
-3. **QEMU's controller state**: the CTU CAN FD model never raises the
-   fault-confinement interrupt, so Linux reports `STOPPED`. Could be fixed
-   in QEMU (raise FCSI when the core is enabled); not done.
+3. **QEMU's controller state: done (2026-11-11).** The CTU CAN FD model
+   now reports its fault confinement state and raises FCSI when enabled
+   (patch in `layers/meta-edge/recipes-devtools/qemu`); the tests require
+   ERROR-ACTIVE. Open: **send the patch upstream** (prepared in
+   [upstream/](upstream/README.md), needs the author's mail setup), then drop
+   the bbappend when Yocto's QEMU contains it; a QEMU qtest for ctucan; bus
+   errors in the model (error-warning/passive, bus-off) would make the
+   driver's error paths testable in QEMU.

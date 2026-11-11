@@ -47,8 +47,11 @@ talks to this image's guest over the same host CAN bus.
 
 ## What's in the image
 
-- **Yocto 6.0.4 "Wrynose"** (the current LTS), distro `poky`, `MACHINE = "qemuarm64"`, systemd 259
-- Linux 6.18 (`linux-yocto`) with a config fragment for SocketCAN, vcan,
+- **Yocto 6.0 "Wrynose"** (the current LTS) at the branch heads of 2026-11-11
+  (yocto-6.0.4 + stable fixes), distro `poky` without the desktop features
+  (`x11`, `wayland`, `opengl`, sound, radios: a headless device),
+  `MACHINE = "qemuarm64"`, systemd 259
+- Linux 6.18.59 (`linux-yocto`, newer than oe-core's pin) with a config fragment for SocketCAN, vcan,
   the CTU CAN FD PCI and Kvaser PCI (SJA1000, classic only) drivers, and the i6300esb watchdog
 - `can-utils`, `iproute2`
 - **can-demo**: a Rust service (raw `CAN_RAW` sockets over `libc`, with
@@ -75,7 +78,13 @@ talks to this image's guest over the same host CAN bus.
 - **Test image** `edge-image-test`: the same plus `ptest-runner`,
   `can-demo-ptest` and an ssh server, for ptest and oe-core's `testimage`
 - **SBOM and CVEs**: SPDX 3.0 SBOM per image (`create-spdx`) and a CVE
-  report per image (`sbom-cve-check`, databases pinned)
+  report per image (`sbom-cve-check`, databases pinned), **triaged**:
+  703 → 133 unpatched entries in installed recipes, every decision in
+  `CVE_STATUS` with its evidence ([docs/cve/README.md](docs/cve/README.md))
+- **A patched QEMU**: the CTU CAN FD model reports its fault confinement
+  state, so Linux shows the controller as ERROR-ACTIVE like on hardware
+  (patch carried in `recipes-devtools/qemu`, prepared for upstream in
+  [docs/upstream/](docs/upstream/))
 
 ## Layout
 
@@ -288,6 +297,20 @@ GitHub was checked separately.
 | Image SBOM (SPDX 3.0) | `edge-image-qemuarm64.rootfs.spdx.json`, 46 MB; records can-demo's source location and commit |
 | CVE report (`sbom-cve-check`, NVD + CVE List of 2026-11-11) | 735 unpatched entries (703 in installed recipes; kernel 594, curl 29, openssl 19, glibc 14), 21,861 patched, 1,258 ignored. **Reported, not fixed**: [docs/cve/edge-image-summary.md](docs/cve/edge-image-summary.md) |
 
+### QEMU fix, layer update, CVE triage (fourth stage)
+
+| Check | Result |
+|---|---|
+| QEMU CTU CAN FD model patched (`qemu-system-native` bbappend) | the driver logs the FCSI interrupt (`ISR = 0x00000010`) and `state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE`; `ip` shows `ERROR-ACTIVE` ([capture](docs/captures/ctucan-fcsi.txt)) |
+| Smoke test, `ctucan_pci` (now requires ERROR-ACTIVE, plus: STOPPED when down, ERROR-ACTIVE again after up) | **17/17** + 2/2 host checks |
+| Smoke test, `kvaser_pci` | **16/16** + 2/2 |
+| testimage (new case `test_can0_state_follows_controller`) | **20 passed, 6 skipped, 0 failed** |
+| A/B test (U-Boot now built without its video stack) | **24/24** |
+| ptest (can-demo, 13 Rust tests) | PASS |
+| Layers → wrynose heads of 2026-11-11; kernel 6.18.52 → 6.18.59; openssl 3.5.9; headless `DISTRO_FEATURES` | built; libx11, libxcb, libxau, libxdmcp gone from the image |
+| CVE report, installed recipes | unpatched **703 → 157** (updates) **→ 133** (triage: 24 decisions, a zlib backport, a U-Boot config change); kernel 594 → 90 ([docs/cve/README.md](docs/cve/README.md)) |
+| QEMU patch for upstream | checkpatch clean, applies to QEMU master; **not sent** ([docs/upstream/](docs/upstream/)) |
+
 ![testimage results](docs/images/testimage.png)
 
 ![Guest can0 in CAN FD mode](docs/images/guest-canfd.png)
@@ -316,12 +339,12 @@ GitHub was checked separately.
 - CAN FD ran only between QEMU's CTU CAN FD model and a host vcan: no
   transceiver, so the data bit rate, sample points and transmitter delay
   compensation were configured but never physically exercised. QEMU's model
-  never reports the controller as error-active, so `ip` shows `STOPPED`
-  while it works (see the learning guide, chapter 26).
-- The CVE report is produced and summarised, but no CVE was fixed or
-  triaged (`CVE_STATUS`); the kernel alone has 594 unpatched entries.
-  `libx11` is in the image only because Poky's `x11` distro feature makes
-  `dbus` link it; not removed.
+  now reports error-active (this project's patch), but it still produces no
+  bus errors, so error-warning, error-passive and bus-off were never seen.
+- 133 CVEs remain unpatched and untriaged (90 kernel, 20 curl, 5 openssl,
+  5 expat, 4 busybox, ...): listed in [docs/cve/README.md](docs/cve/README.md).
+  curl's High-rated CVE-2026-92392 is affected and not fixed here (the
+  upstream fix does not apply to 8.19.0).
 - testimage's `ping` case passes without pinging under slirp networking, and
   its systemd service tests are skipped (they need avahi).
 - The image is a development image: root logs in without a password.
@@ -345,6 +368,12 @@ GitHub was checked separately.
   about 1 min. Disk after: **~47 GB** (`build/` 31 GB, of which 8.8 GB are
   the unpacked CVE databases; downloads 9.5 GB, sstate 5.8 GB).
 
+- Fourth stage (QEMU patch, layer update, headless distro, CVE triage):
+  QEMU rebuild 25 min; the layer update rebuilt most of the tree (the final
+  successful run 149 min) but took 6 hours on this nearly full disk, and
+  a mistake of mine with the sstate cache cost another toolchain rebuild
+  (journal, sections 26–27). Disk after: 19 GB free of 84 GB.
+
 Details: [docs/build-journal.md](docs/build-journal.md).
 
 ## Documentation
@@ -355,25 +384,31 @@ Details: [docs/build-journal.md](docs/build-journal.md).
   part 2: wic, read-only rootfs, overlays, U-Boot environment and boot
   counting, RAUC slots/bundles/signing, health checks and rollback;
   part 3: ptest, oeqa/testimage, SBOM and CVE checking with the EU Cyber
-  Resilience Act, SRCREV pinning, CAN FD and the SocketCAN FD API)
+  Resilience Act, SRCREV pinning, CAN FD and the SocketCAN FD API;
+  part 4: debugging a QEMU device model against the Linux driver, carrying
+  a patch, upstreaming etiquette, DISTRO_FEATURES, layer updates, CVE
+  triage with CVE_STATUS)
 - [docs/build-journal.md](docs/build-journal.md): every command, problem and fix, with timings
 - [docs/can-bridge.md](docs/can-bridge.md): guest CAN ⇄ host vcan0, watching it on the host
-- [docs/cve/edge-image-summary.md](docs/cve/edge-image-summary.md): the CVE report, summarised
+- [docs/cve/README.md](docs/cve/README.md): CVE triage, before/after and every decision;
+  [docs/cve/edge-image-summary.md](docs/cve/edge-image-summary.md): the report, summarised
+- [docs/upstream/](docs/upstream/): the QEMU patch, ready to send (not sent)
 - [docs/next-steps.md](docs/next-steps.md): what is left (remote updates, recovery, real hardware, CVE triage)
 
 ## Pinned versions
 
 | Component | Version / commit |
 |---|---|
-| bitbake | 2.18, `51fd94a6` (yocto-6.0.4) |
-| openembedded-core | wrynose, `0f03c732` (yocto-6.0.4) |
-| meta-yocto (meta-poky) | wrynose, `7c25b111` (yocto-6.0.4) |
+| bitbake | 2.18, `6e260eb6` (head 2026-11-11; yocto-6.0.4 + 1) |
+| openembedded-core | wrynose, `2285da08` (head 2026-11-11; yocto-6.0.4 + 83) |
+| meta-yocto (meta-poky) | wrynose, `79b6d870` (head 2026-11-11; yocto-6.0.4 + 1) |
 | meta-openembedded (meta-oe) | wrynose, `c0fcd7cc` |
 | meta-rauc | wrynose, `38da0e58` (RAUC 1.15.2) |
+| Linux (linux-yocto) | 6.18.59: `v6.18/standard/base` `0aa9c16e`, kernel-cache `cf1eb351` |
 | U-Boot (from oe-core) | 2026.01, `qemu_arm64_defconfig` |
 | kas / kas-container | 5.5 |
 | Rust (from oe-core) | 1.94.1 |
-| QEMU (built by Yocto) | 10.2.0 |
+| QEMU (built by Yocto) | 10.2.0 + `hw/net/can/ctucan` fault confinement patch |
 
 ## License
 

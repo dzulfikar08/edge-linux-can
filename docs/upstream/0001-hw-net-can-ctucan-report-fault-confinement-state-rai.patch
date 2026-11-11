@@ -1,0 +1,165 @@
+From 8db605351a1ab60e3175a7b32b00275521abe03c Mon Sep 17 00:00:00 2001
+From: Dzulfikar Ats Tsauri <your-real-address>
+Date: Wed, 11 Nov 2026 17:39:37 +0700
+Subject: [PATCH] hw/net/can/ctucan: report fault confinement state, raise FCSI
+ on enable
+
+The CTU CAN FD model never leaves its reset fault confinement state:
+INT_STAT[FCSI] is never set, and reads of the EWL/ERP/FAULT_STATE
+(0x2c) and REC/TEC (0x30) words are not handled, so they return 0.
+
+The CTU CAN FD datasheet (v2.7.0, section 2.5 "Operating modes")
+describes what happens when software sets SETTINGS[ENA]: the core
+integrates to the bus while it is bus-off, then becomes error-active,
+and "the moment when CTU CAN FD joined CAN bus communication can be
+determined by FCS interrupt, and subsequent probing of FAULT_STATE".
+Section 2.12.2 adds that FCSI is set "upon any Fault confinement state
+change (even bus-off to error-active)", and the COMMAND[ERCRST]
+description that a disabled core (SETTINGS[ENA] = 0) is bus-off. The
+RTL matches: fault_confinement_fsm.vhd resets to bus-off, the CAN core
+is held in reset while ENA is 0, and protocol_control_fsm.vhd sets the
+node error-active, clearing REC/TEC, at the end of integration.
+
+The Linux ctucanfd driver relies on exactly this. ctucan_chip_start()
+sets the interface state to CAN_STATE_STOPPED ("Controller enters
+ERROR_ACTIVE on initial FCSI") and enables the core; the error
+interrupt handler then reads FAULT_STATE to find the new state. With
+the model, the interface stays STOPPED ("ip -details link show can0"
+reports "state STOPPED") although frames are sent and received, and
+raising FCSI alone would not be enough: FAULT_STATE reads as 0, which
+the driver treats as an invalid state (WARN in
+ctucan_read_fault_state()).
+
+Model the documented behaviour:
+
+- Reset (MODE[RST]) sets the register reset values: EW_LIMIT 96,
+  ERP_LIMIT 128, FAULT_STATE bus-off, REC and TEC 0.
+- Clearing SETTINGS[ENA] returns the node to bus-off with cleared
+  error counters.
+- Setting SETTINGS[ENA] makes the node error-active and raises FCSI.
+  The model has no bit timing, so integration completes at once.
+- EWL/ERP/FAULT_STATE and REC/TEC are readable.
+
+The model does not produce bus errors, so the node then stays
+error-active until it is disabled or reset. Writes to EWL/ERP are
+still ignored (Linux never writes them). Both registers were already
+part of the migration state, so no VMState change is needed.
+
+Datasheet: https://canbus.pages.fel.cvut.cz/ctucanfd_ip_core/doc/Datasheet.pdf
+RTL: https://gitlab.fel.cvut.cz/canbus/ctucanfd_ip_core/-/blob/b76a8888ecd10d2a1f38590eadfc8a3dc2394b48/src/can_core/fault_confinement_fsm.vhd
+Driver: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/net/can/ctucanfd/ctucanfd_base.c
+
+Signed-off-by: Dzulfikar Ats Tsauri <your-real-address>
+---
+Tested on master 29760efaf9 (v11.2.0-rc0) with qemu-system-aarch64 -M virt
+(--target-list=aarch64-softmmu), booting a Linux 6.18.59 (arm64) image with
+-device ctucan_pci bridged to a host vcan interface (can-host-socketcan):
+
+- With the patch: the driver logs "ctucan_err_interrupt: ISR = 0x00000010"
+  and "state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE";
+  "ip -details link show can0" reports ERROR-ACTIVE; after "ip link set
+  can0 down" it reports STOPPED and the next "up" raises FCSI again;
+  classic and CAN FD (64 bytes, BRS) frames pass in both directions.
+- Without the patch, same image and setup: frames pass, but the state
+  stays STOPPED.
+- tests/qtest/xlnx-can-test (5/5) and xlnx-canfd-test (3/3) still pass.
+  There is no qtest for the CTU CAN FD model yet; I can write one (enable
+  the core, check FAULT_STATE and INT_STAT.FCSI) if that is wanted.
+
+The same change on QEMU 10.2.0 has been in use in a Yocto build since
+2026-11-11.
+
+ hw/net/can/ctucan_core.c | 50 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/hw/net/can/ctucan_core.c b/hw/net/can/ctucan_core.c
+index f6ff4ad..d2bb747 100644
+--- a/hw/net/can/ctucan_core.c
++++ b/hw/net/can/ctucan_core.c
+@@ -188,6 +188,36 @@ static void ctucan_update_txnf(CtuCanCoreState *s)
+     s->status.s.txnf = txnf;
+ }
+ 
++/*
++ * Fault confinement. While SETTINGS[ENA] is 0 the CAN core is held in reset:
++ * the node is bus-off and both error counters are zero. After the core is
++ * enabled it integrates to the bus and, coming from bus-off, becomes
++ * error-active, clears REC and TEC and raises FCSI. The model has no bit
++ * timing, so integration completes at once, and it never sees bus errors,
++ * so the node stays error-active until it is disabled or reset.
++ */
++static void ctucan_fault_confinement_reset(CtuCanCoreState *s)
++{
++    s->ewl_erp_fault_state.s.era = 0;
++    s->ewl_erp_fault_state.s.erp = 0;
++    s->ewl_erp_fault_state.s.bof = 1;
++    s->rec_tec.u32 = 0;
++}
++
++static void ctucan_set_err_active(CtuCanCoreState *s)
++{
++    union ctu_can_fd_int_stat int_stat;
++
++    s->ewl_erp_fault_state.s.era = 1;
++    s->ewl_erp_fault_state.s.erp = 0;
++    s->ewl_erp_fault_state.s.bof = 0;
++    s->rec_tec.u32 = 0;
++
++    int_stat.u32 = 0;
++    int_stat.s.fcsi = 1;
++    s->int_stat.u32 |= int_stat.u32 & ~s->int_mask.u32;
++}
++
+ void ctucan_hardware_reset(CtuCanCoreState *s)
+ {
+     DPRINTF("Hardware reset in progress!!!\n");
+@@ -230,6 +260,11 @@ void ctucan_hardware_reset(CtuCanCoreState *s)
+     s->rx_fr_ctr.u32 = 0;
+     s->tx_fr_ctr.u32 = 0;
+ 
++    s->ewl_erp_fault_state.u32 = 0;
++    s->ewl_erp_fault_state.s.ew_limit = 96;
++    s->ewl_erp_fault_state.s.erp_limit = 128;
++    ctucan_fault_confinement_reset(s);
++
+     s->yolo_reg.s.yolo_val = 3735928559;
+ 
+     qemu_irq_lower(s->irq);
+@@ -311,12 +346,21 @@ void ctucan_mem_write(CtuCanCoreState *s, hwaddr addr, uint64_t val,
+     } else {
+         switch (addr & ~3) {
+         case CTU_CAN_FD_MODE:
++        {
++            bool was_enabled = s->mode_settings.s.ena;
++
+             s->mode_settings.u32 = (uint32_t)val;
+             if (s->mode_settings.s.rst) {
+                 ctucan_hardware_reset(s);
+                 s->mode_settings.s.rst = 0;
+             }
++            if (!was_enabled && s->mode_settings.s.ena) {
++                ctucan_set_err_active(s);
++            } else if (was_enabled && !s->mode_settings.s.ena) {
++                ctucan_fault_confinement_reset(s);
++            }
+             break;
++        }
+         case CTU_CAN_FD_COMMAND:
+         {
+             union ctu_can_fd_command command;
+@@ -494,6 +538,12 @@ uint64_t ctucan_mem_read(CtuCanCoreState *s, hwaddr addr, unsigned size)
+             val = 0;
+         }
+         break;
++    case CTU_CAN_FD_EWL:
++        val = s->ewl_erp_fault_state.u32;
++        break;
++    case CTU_CAN_FD_REC:
++        val = s->rec_tec.u32;
++        break;
+     case CTU_CAN_FD_TX_STATUS:
+         val = s->tx_status.u32;
+         break;
+-- 
+2.56.0
+

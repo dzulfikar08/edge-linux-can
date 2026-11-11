@@ -1,0 +1,17 @@
+# docs/upstream/boot-test.py on QEMU master 29760efaf9, 2026-11-12, edge-image (Linux 6.18.59 arm64)
+
+## with the patch (8db6053): 9/9
+[   16.271506] ctucanfd_pci 0000:00:02.0 can0: ctucan_err_interrupt: ISR = 0x00000010, rxerr 0, txerr 0, error type 0, pos 0, ALC id_field 0, bit 0
+[   16.271969] ctucanfd_pci 0000:00:02.0 can0: state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE
+can <FD> state ERROR-ACTIVE
+    can <FD> state ERROR-ACTIVE (berr-counter tx 0 rx 0) restart-ms 100 
+can <FD> state STOPPED
+
+## without the patch (29760efaf9): 6/9
+can <FD> state STOPPED
+    can <FD> state STOPPED (berr-counter tx 0 rx 0) restart-ms 100 
+(no ctucan_err_interrupt / state change lines in the kernel log)
+
+## qtests (QTEST_QEMU_BINARY=build/qemu-system-aarch64)
+xlnx-can-test: 5/5 ok
+xlnx-canfd-test: 3/3 ok
