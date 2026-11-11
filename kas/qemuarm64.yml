@@ -13,7 +13,9 @@ target:
 
 defaults:
   repos:
-    # Layers are pinned to the commits behind the yocto-6.0.4 tags.
+    # Layers are pinned to wrynose branch heads of 2026-11-11: yocto-6.0.4
+    # plus the stable fixes merged since (no 6.0.5 tag yet). Bump: git
+    # ls-remote <url> wrynose (bitbake: 2.18), see docs/build-journal.md part 4.
     branch: wrynose
 
 repos:
@@ -26,39 +28,46 @@ repos:
   # so the repo names below matter (kas checks them out side by side).
   bitbake:
     url: https://git.openembedded.org/bitbake
-    commit: 51fd94a67fa17650a9ff623492005972bbc7d26f   # yocto-6.0.4
+    commit: 6e260eb6ab1631607ea414d9ff8ede1155faa5d9   # 2.18 head 2026-11-11 (yocto-6.0.4 + 1)
     branch: "2.18"
     layers:
       .: disabled
 
   openembedded-core:
     url: https://git.openembedded.org/openembedded-core
-    commit: 0f03c732a0a2d0506b41b1abe60b3f368b2300dc   # yocto-6.0.4
+    commit: 2285da08068a6d1b4a64c9a52d85a58be50e4679   # wrynose head 2026-11-11 (yocto-6.0.4 + 83)
     layers:
       meta:
 
   meta-yocto:
     url: https://git.yoctoproject.org/meta-yocto
-    commit: 7c25b11156553145fa6b241a2d4f65d94438f804   # yocto-6.0.4
+    commit: 79b6d87030178bed0088ad3b00aa6dfbabac37c4   # wrynose head 2026-11-11 (yocto-6.0.4 + 1)
     layers:
       meta-poky:
 
   meta-openembedded:
     url: https://git.openembedded.org/meta-openembedded
-    commit: c0fcd7cca3760ef24e087ac4a31b8f357cb204da   # wrynose, 2026-11-10
+    commit: c0fcd7cca3760ef24e087ac4a31b8f357cb204da   # wrynose head (unchanged 2026-11-11)
     layers:
       meta-oe:          # can-utils
 
   # RAUC: A/B update client, bundle class, kernel/busybox config it needs.
   meta-rauc:
     url: https://github.com/rauc/meta-rauc
-    commit: 38da0e5866a953e664001ba90b5edad68d68cd5d   # wrynose, 2026-06-02 (RAUC 1.15.2)
+    commit: 38da0e5866a953e664001ba90b5edad68d68cd5d   # wrynose head (2026-06-02, RAUC 1.15.2; unchanged 2026-11-11)
     layers:
       .:
 
 local_conf_header:
   init: |
     INIT_MANAGER = "systemd"
+  headless: |
+    # A headless CAN device: no display, GPU, sound or radios. Poky enables
+    # all of these by default; with x11 on, dbus pulls libx11 into the image
+    # (dbus-launch). Removing them shrinks the image and its CVE surface.
+    # Kept: ptest (can-demo-ptest), pci, seccomp, acl/xattr, ipv4/ipv6, vfat
+    # (boot partition), nfs, zeroconf, debuginfod, ldconfig, multiarch.
+    DISTRO_FEATURES:remove = "x11 wayland opengl vulkan pulseaudio gobject-introspection-data alsa bluetooth wifi nfc 3g"
   update: |
     # RAUC A/B updates. The distro feature turns on meta-rauc's kernel and
     # busybox config fragments (loop, squashfs, dm-verity for verity bundles).
