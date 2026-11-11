@@ -2,6 +2,12 @@
 //! SocketCAN interface. Built to run under systemd: logs go to stdout with
 //! sd-daemon priority prefixes (picked up by journald), and it reports
 //! READY=1 / WATCHDOG=1 over $NOTIFY_SOCKET when that is set.
+//!
+//! Frames it sends (see docs/can-demo.dbc):
+//! - heartbeat, classic CAN, 8 bytes: seq (u32 LE) + "HBT1"
+//! - telemetry, CAN FD with bit rate switch, 64 bytes (only when the
+//!   interface can carry FD frames): seq, "FDT1", uptime, frames received,
+//!   start count, and a 32-byte counting pattern that receivers can check.
 
 mod can;
 mod notify;
@@ -10,17 +16,21 @@ mod state;
 use std::collections::BTreeMap;
 use std::io;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use can::{CanFrame, CanSocket};
+use can::{CanSocket, Frame, CANFD_MTU};
 
 #[derive(Debug, Clone, PartialEq)]
 struct Config {
     iface: String,
     heartbeat_id: u32,
+    /// CAN FD telemetry: auto = send it when the interface MTU allows FD.
+    fd: FdMode,
+    /// Telemetry id; None = heartbeat id + 0x100.
+    fd_id: Option<u32>,
     interval: Duration,
     report_every: Duration,
     send: bool,
@@ -32,6 +42,8 @@ impl Default for Config {
         Self {
             iface: "vcan0".into(),
             heartbeat_id: 0x100,
+            fd: FdMode::Auto,
+            fd_id: None,
             interval: Duration::from_millis(1000),
             report_every: Duration::from_secs(10),
             send: true,
@@ -40,11 +52,25 @@ impl Default for Config {
     }
 }
 
-const USAGE: &str = "\
-usage: can-demo [--iface NAME] [--id HEX] [--interval-ms N] [--report-s N] [--mode both|send|listen]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FdMode {
+    Auto,
+    On,
+    Off,
+}
 
-Environment (overridden by flags): CAN_DEMO_IFACE, CAN_DEMO_ID, CAN_DEMO_INTERVAL_MS,
-CAN_DEMO_REPORT_S, CAN_DEMO_MODE.";
+impl Config {
+    fn telemetry_id(&self) -> u32 {
+        self.fd_id.unwrap_or(self.heartbeat_id + 0x100)
+    }
+}
+
+const USAGE: &str = "\
+usage: can-demo [--iface NAME] [--id HEX] [--fd auto|on|off] [--fd-id HEX]
+                [--interval-ms N] [--report-s N] [--mode both|send|listen]
+
+Environment (overridden by flags): CAN_DEMO_IFACE, CAN_DEMO_ID, CAN_DEMO_FD,
+CAN_DEMO_FD_ID, CAN_DEMO_INTERVAL_MS, CAN_DEMO_REPORT_S, CAN_DEMO_MODE.";
 
 fn parse_id(s: &str) -> Result<u32, String> {
     let t = s.trim_start_matches("0x").trim_start_matches("0X");
@@ -59,6 +85,15 @@ fn apply(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
     match key {
         "iface" => cfg.iface = val.to_string(),
         "id" => cfg.heartbeat_id = parse_id(val)?,
+        "fd-id" => cfg.fd_id = Some(parse_id(val)?),
+        "fd" => {
+            cfg.fd = match val {
+                "auto" => FdMode::Auto,
+                "on" => FdMode::On,
+                "off" => FdMode::Off,
+                _ => return Err(format!("bad fd mode {val:?}")),
+            }
+        }
         "interval-ms" => cfg.interval = Duration::from_millis(parse_u64(key, val)?.max(10)),
         "report-s" => cfg.report_every = Duration::from_secs(parse_u64(key, val)?.max(1)),
         "mode" => {
@@ -83,6 +118,8 @@ where
     for (var, key) in [
         ("CAN_DEMO_IFACE", "iface"),
         ("CAN_DEMO_ID", "id"),
+        ("CAN_DEMO_FD", "fd"),
+        ("CAN_DEMO_FD_ID", "fd-id"),
         ("CAN_DEMO_INTERVAL_MS", "interval-ms"),
         ("CAN_DEMO_REPORT_S", "report-s"),
         ("CAN_DEMO_MODE", "mode"),
@@ -130,17 +167,107 @@ fn heartbeat_payload(seq: u32) -> [u8; 8] {
     p
 }
 
-fn heartbeat_seq(frame: &CanFrame) -> Option<u32> {
+fn heartbeat_seq(frame: &Frame) -> Option<u32> {
     let p = frame.payload();
-    (p.len() == 8 && &p[4..] == b"HBT1").then(|| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
+    (!frame.is_fd() && p.len() == 8 && &p[4..] == b"HBT1").then(|| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
 }
 
-fn run_sender(cfg: Config, stop: Arc<AtomicBool>) -> io::Result<()> {
+/// What goes into the 64-byte FD telemetry frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Telemetry {
+    seq: u32,
+    uptime_ms: u64,
+    frames_rx: u64,
+    start_count: u32,
+}
+
+const TELEMETRY_LEN: usize = 64;
+const PATTERN_AT: usize = 32;
+
+fn telemetry_payload(t: &Telemetry) -> [u8; TELEMETRY_LEN] {
+    let mut p = [0u8; TELEMETRY_LEN];
+    p[0..4].copy_from_slice(&t.seq.to_le_bytes());
+    p[4..8].copy_from_slice(b"FDT1");
+    p[8..16].copy_from_slice(&t.uptime_ms.to_le_bytes());
+    p[16..24].copy_from_slice(&t.frames_rx.to_le_bytes());
+    p[24..28].copy_from_slice(&t.start_count.to_le_bytes());
+    // bytes 28..32 reserved (0); 32..64: seq's low byte counting up, so a
+    // receiver can tell that all 64 bytes arrived intact.
+    for (i, b) in p[PATTERN_AT..].iter_mut().enumerate() {
+        *b = (t.seq as u8).wrapping_add(i as u8);
+    }
+    p
+}
+
+/// Some(Ok) for an intact telemetry frame, Some(Err(seq)) for one whose
+/// pattern is wrong, None if the frame is not telemetry.
+fn parse_telemetry(frame: &Frame) -> Option<Result<Telemetry, u32>> {
+    let p = frame.payload();
+    if !frame.is_fd() || p.len() != TELEMETRY_LEN || &p[4..8] != b"FDT1" {
+        return None;
+    }
+    let u64_at = |i: usize| u64::from_le_bytes(p[i..i + 8].try_into().unwrap());
+    let t = Telemetry {
+        seq: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+        uptime_ms: u64_at(8),
+        frames_rx: u64_at(16),
+        start_count: u32::from_le_bytes(p[24..28].try_into().unwrap()),
+    };
+    let intact = p[PATTERN_AT..].iter().enumerate().all(|(i, &b)| b == (t.seq as u8).wrapping_add(i as u8));
+    Some(if intact { Ok(t) } else { Err(t.seq) })
+}
+
+/// Whether to send FD telemetry on this interface (FdMode::Auto: if its MTU
+/// can carry FD frames).
+fn fd_enabled(cfg: &Config) -> bool {
+    match cfg.fd {
+        FdMode::On => true,
+        FdMode::Off => false,
+        FdMode::Auto => can::interface_mtu(&cfg.iface).is_ok_and(|m| m >= CANFD_MTU),
+    }
+}
+
+struct Shared {
+    stop: AtomicBool,
+    frames_rx: AtomicU64,
+    start_count: AtomicU64,
+}
+
+fn run_sender(cfg: Config, shared: Arc<Shared>) -> io::Result<()> {
     let sock = CanSocket::open(&cfg.iface)?;
+    let fd = fd_enabled(&cfg);
+    if fd {
+        log(INFO, &format!("sender: CAN FD telemetry on {} with id {:#x}", cfg.iface, cfg.telemetry_id()));
+    } else {
+        log(INFO, &format!("sender: {} is classic CAN only (or --fd off): heartbeat only", cfg.iface));
+    }
+    let started = Instant::now();
     let mut seq: u32 = 0;
     let mut failing = false;
-    while !stop.load(Ordering::Relaxed) {
-        let frame = CanFrame::new(cfg.heartbeat_id, &heartbeat_payload(seq)).expect("valid id");
+    let mut fd_failing = false;
+    while !shared.stop.load(Ordering::Relaxed) {
+        if fd {
+            let t = Telemetry {
+                seq,
+                uptime_ms: started.elapsed().as_millis() as u64,
+                frames_rx: shared.frames_rx.load(Ordering::Relaxed),
+                start_count: shared.start_count.load(Ordering::Relaxed) as u32,
+            };
+            let frame = Frame::fd(cfg.telemetry_id(), &telemetry_payload(&t), true).expect("valid id and length");
+            match sock.write_frame(&frame) {
+                Ok(()) if fd_failing => {
+                    log(INFO, &format!("telemetry: sending again (seq {seq})"));
+                    fd_failing = false;
+                }
+                Ok(()) => {}
+                Err(e) if !fd_failing => {
+                    log(WARN, &format!("telemetry: write failed: {e}"));
+                    fd_failing = true;
+                }
+                Err(_) => {}
+            }
+        }
+        let frame = Frame::classic(cfg.heartbeat_id, &heartbeat_payload(seq)).expect("valid id");
         match sock.write_frame(&frame) {
             Ok(()) => {
                 if failing {
@@ -165,19 +292,27 @@ fn run_sender(cfg: Config, stop: Arc<AtomicBool>) -> io::Result<()> {
 struct Stats {
     total: u64,
     errors: u64,
+    fd: u64,
+    fd_bad: u64,
     per_id: BTreeMap<u32, u64>,
     hb_last: Option<u32>,
     hb_missed: u64,
 }
 
 impl Stats {
-    fn record(&mut self, frame: &CanFrame, heartbeat_id: u32) {
+    fn record(&mut self, frame: &Frame, heartbeat_id: u32) {
         self.total += 1;
         if frame.is_error() {
             self.errors += 1;
             return;
         }
         *self.per_id.entry(frame.id()).or_default() += 1;
+        if frame.is_fd() {
+            self.fd += 1;
+            if let Some(Err(_)) = parse_telemetry(frame) {
+                self.fd_bad += 1;
+            }
+        }
         if frame.id() == heartbeat_id {
             if let Some(seq) = heartbeat_seq(frame) {
                 if let Some(last) = self.hb_last {
@@ -195,9 +330,11 @@ impl Stats {
         let ids: Vec<String> = self.per_id.iter().take(8).map(|(id, n)| format!("{id:#x}={n}")).collect();
         let more = if self.per_id.len() > 8 { format!(" (+{} ids)", self.per_id.len() - 8) } else { String::new() };
         format!(
-            "frames total={} errors={} heartbeat_last_seq={} heartbeat_missed={} ids[{}]{}",
+            "frames total={} errors={} fd={} fd_bad={} heartbeat_last_seq={} heartbeat_missed={} ids[{}]{}",
             self.total,
             self.errors,
+            self.fd,
+            self.fd_bad,
             self.hb_last.map_or("-".into(), |s| s.to_string()),
             self.hb_missed,
             ids.join(" "),
@@ -206,18 +343,24 @@ impl Stats {
     }
 }
 
-fn run_listener(cfg: &Config, stop: &AtomicBool) -> io::Result<()> {
+fn run_listener(cfg: &Config, shared: &Shared) -> io::Result<()> {
     let sock = CanSocket::open(&cfg.iface)?;
     sock.set_read_timeout(Duration::from_secs(1))?;
     let mut stats = Stats::default();
     let mut last_report = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
+    while !shared.stop.load(Ordering::Relaxed) {
         match sock.read_frame() {
             Ok(frame) => {
                 if !stats.per_id.contains_key(&frame.id()) && !frame.is_error() {
-                    log(INFO, &format!("listener: first frame from id {:#x} len {}", frame.id(), frame.len));
+                    let kind = match (frame.is_fd(), frame.flags() & can::CANFD_BRS != 0) {
+                        (false, _) => "classic",
+                        (true, false) => "FD",
+                        (true, true) => "FD+BRS",
+                    };
+                    log(INFO, &format!("listener: first frame from id {:#x} len {} ({kind})", frame.id(), frame.payload().len()));
                 }
                 stats.record(&frame, cfg.heartbeat_id);
+                shared.frames_rx.store(stats.total, Ordering::Relaxed);
             }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
             Err(e) => return Err(e),
@@ -242,31 +385,40 @@ fn main() -> ExitCode {
     log(
         INFO,
         &format!(
-            "can-demo {} starting: iface={} heartbeat_id={:#x} interval={}ms send={} listen={}",
+            "can-demo {} starting: iface={} heartbeat_id={:#x} fd={:?} fd_id={:#x} interval={}ms send={} listen={}",
             env!("CARGO_PKG_VERSION"),
             cfg.iface,
             cfg.heartbeat_id,
+            cfg.fd,
+            cfg.telemetry_id(),
             cfg.interval.as_millis(),
             cfg.send,
             cfg.listen
         ),
     );
+    let shared = Arc::new(Shared {
+        stop: AtomicBool::new(false),
+        frames_rx: AtomicU64::new(0),
+        start_count: AtomicU64::new(0),
+    });
     if let Some(dir) = std::env::var_os("STATE_DIRECTORY") {
         match state::bump_start_count(std::path::Path::new(&dir), &cfg.iface) {
-            Ok(n) => log(INFO, &format!("start #{n} on {} (count kept in {})", cfg.iface, dir.to_string_lossy())),
+            Ok(n) => {
+                shared.start_count.store(n, Ordering::Relaxed);
+                log(INFO, &format!("start #{n} on {} (count kept in {})", cfg.iface, dir.to_string_lossy()))
+            }
             Err(e) => log(WARN, &format!("cannot update start count in {}: {e}", dir.to_string_lossy())),
         }
     }
 
-    let stop = Arc::new(AtomicBool::new(false));
     let sender = cfg.send.then(|| {
-        let (c, s) = (cfg.clone(), stop.clone());
+        let (c, s) = (cfg.clone(), shared.clone());
         thread::spawn(move || run_sender(c, s))
     });
     notify::ready();
 
     let result = if cfg.listen {
-        run_listener(&cfg, &stop)
+        run_listener(&cfg, &shared)
     } else {
         loop {
             notify::watchdog();
@@ -276,7 +428,7 @@ fn main() -> ExitCode {
             thread::sleep(Duration::from_secs(1));
         }
     };
-    stop.store(true, Ordering::Relaxed);
+    shared.stop.store(true, Ordering::Relaxed);
     let sender_result = sender.map(|h| h.join().unwrap_or_else(|_| Err(io::Error::other("sender panicked"))));
 
     match result.and(sender_result.unwrap_or(Ok(()))) {
@@ -324,12 +476,50 @@ mod tests {
     fn counts_heartbeat_gaps() {
         let mut s = Stats::default();
         for seq in [0u32, 1, 2, 5, 6] {
-            s.record(&CanFrame::new(0x100, &heartbeat_payload(seq)).unwrap(), 0x100);
+            s.record(&Frame::classic(0x100, &heartbeat_payload(seq)).unwrap(), 0x100);
         }
-        s.record(&CanFrame::new(0x200, &[1]).unwrap(), 0x100);
-        assert_eq!(s.total, 6);
+        s.record(&Frame::classic(0x300, &[1]).unwrap(), 0x100);
+        // An FD frame with the heartbeat id is not a heartbeat.
+        s.record(&Frame::fd(0x100, &heartbeat_payload(9), false).unwrap(), 0x100);
+        assert_eq!(s.total, 7);
         assert_eq!(s.hb_missed, 2);
         assert_eq!(s.hb_last, Some(6));
-        assert_eq!(s.per_id[&0x200], 1);
+        assert_eq!(s.per_id[&0x300], 1);
+        assert_eq!(s.fd, 1);
+    }
+
+    #[test]
+    fn fd_options() {
+        let c = cfg(&[], &[]).unwrap();
+        assert_eq!((c.fd, c.telemetry_id()), (FdMode::Auto, 0x200));
+        let c = cfg(&["--id", "0x101"], &[("CAN_DEMO_FD", "off")]).unwrap();
+        assert_eq!((c.fd, c.telemetry_id()), (FdMode::Off, 0x201));
+        let c = cfg(&["--fd=on", "--fd-id", "0x1abcde"], &[]).unwrap();
+        assert_eq!((c.fd, c.telemetry_id()), (FdMode::On, 0x1abcde));
+        assert!(cfg(&["--fd", "maybe"], &[]).is_err());
+    }
+
+    #[test]
+    fn telemetry_round_trip_and_damage() {
+        let t = Telemetry { seq: 300, uptime_ms: 123_456, frames_rx: 99, start_count: 4 };
+        let p = telemetry_payload(&t);
+        assert_eq!(&p[4..8], b"FDT1");
+        assert_eq!(p[PATTERN_AT], 300u32 as u8); // 0x2C
+        assert_eq!(p[63], (300u32 as u8).wrapping_add(31));
+        let f = Frame::fd(0x201, &p, true).unwrap();
+        assert_eq!(parse_telemetry(&f), Some(Ok(t)));
+
+        let mut bad = p;
+        bad[50] ^= 0xFF;
+        let fb = Frame::fd(0x201, &bad, true).unwrap();
+        assert_eq!(parse_telemetry(&fb), Some(Err(300)));
+        let mut s = Stats::default();
+        s.record(&f, 0x101);
+        s.record(&fb, 0x101);
+        assert_eq!((s.fd, s.fd_bad), (2, 1));
+
+        // Classic frames and other FD frames are not telemetry.
+        assert_eq!(parse_telemetry(&Frame::classic(0x201, &[0; 8]).unwrap()), None);
+        assert_eq!(parse_telemetry(&Frame::fd(0x201, &[0; 64], true).unwrap()), None);
     }
 }
