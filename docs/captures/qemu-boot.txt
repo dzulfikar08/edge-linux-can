@@ -1,0 +1,46 @@
+$ runqemu qemuarm64 edge-image nographic slirp snapshot \
+    qemuparams="-device i6300esb -object can-bus,id=canbus0 \
+    -object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0 -device kvaser_pci,canbus=canbus0"
+...
+[    0.000000] Linux version 6.18.52-yocto-standard (oe-user@oe-host) (aarch64-poky-linux-gcc (GCC) 15.3.0, GNU ld (GNU Binutils) 2.46.1.20260718) #1 SMP PREEMPT Wed Sep 23 03:10:06 UTC 2026
+[    0.000000] Machine model: linux,dummy-virt
+...
+[    4.618576] i6300ESB timer 0000:00:05.0: enabling device (0000 -> 0002)
+[    4.628845] i6300ESB timer 0000:00:05.0: initialized. heartbeat=30 sec (nowayout=0)
+...
+Welcome to Poky (Yocto Project Reference Distro) 6.0.4 (wrynose)!
+[    7.263316] systemd[1]: Using hardware watchdog /dev/watchdog0: 'i6300ESB timer', version 0.
+...
+         Starting Create virtual CAN interface vcan0...
+[   14.688271] CAN device driver interface
+[   14.700731] vcan: Virtual CAN interface driver
+[  OK  ] Started D-Bus System Message Bus.
+[  OK  ] Finished Create virtual CAN interface vcan0.
+[  OK  ] Started User Login Management.
+[  OK  ] Found device /dev/ttyAMA0.
+[  OK  ] Reached target Preparation for Network.
+[  OK  ] Started Serial Getty on ttyAMA0.
+         Starting Network Management...
+[   16.601056] sja1000 CAN netdevice driver
+[   16.661625] kvaser_pci 0000:00:06.0: initializing device 10e8:8406
+[   16.663031] kvaser_pci 0000:00:06.0: enabling device (0000 -> 0001)
+[   16.673047] kvaser_pci 0000:00:06.0: reg_base=00000000a5bf3c6f conf_addr=00000000475abcf1 irq=16
+[   16.773118] kvaser_pci 0000:00:06.0: xilinx version=13 number of channels=0
+[  OK  ] Listening on Load/Save RF Kill Switch Status /dev/rfkill Watch.
+[  OK  ] Created slice Slice /system/can-demo.
+         Starting CAN heartbeat sender and frame counter on vcan0...
+[  OK  ] Created slice Slice /system/can-bitrate.
+[   18.042882] can: controller area network core
+[   18.043821] NET: Registered PF_CAN protocol family
+         Starting Configure bit rate and bring up CAN interface can0...
+[   18.098940] can: raw protocol
+         Starting Virtual Console Setup...
+[  OK  ] Started CAN heartbeat sender and frame counter on vcan0.
+[  OK  ] Started Network Management.
+[  OK  ] Reached target Network.
+[  OK  ] Finished Configure bit rate and bring up CAN interface can0.
+         Starting CAN heartbeat sender and frame counter on can0...
+[  OK  ] Finished Virtual Console Setup.
+[  OK  ] Started CAN heartbeat sender and frame counter on can0.
+Poky (Yocto Project Reference Distro) 6.0.4 qemuarm64 ttyAMA0
+qemuarm64 login: root

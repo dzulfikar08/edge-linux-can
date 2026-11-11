@@ -1,0 +1,14 @@
+#!/bin/sh
+# Wrapper around kas-container that keeps every heavy directory on the build
+# disk. Override YOCTO_STORAGE to build elsewhere.
+#   scripts/kas build kas/qemuarm64.yml
+#   scripts/kas shell kas/qemuarm64.yml
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+: "${YOCTO_STORAGE:=/mnt/yocto}"
+export KAS_WORK_DIR="${KAS_WORK_DIR:-$YOCTO_STORAGE/work}"
+export KAS_BUILD_DIR="${KAS_BUILD_DIR:-$YOCTO_STORAGE/build}"
+export DL_DIR="${DL_DIR:-$YOCTO_STORAGE/downloads}"
+export SSTATE_DIR="${SSTATE_DIR:-$YOCTO_STORAGE/sstate}"
+mkdir -p "$KAS_WORK_DIR" "$KAS_BUILD_DIR" "$DL_DIR" "$SSTATE_DIR"
+exec "$here/kas-container" "$@"

@@ -1,0 +1,17 @@
+[Unit]
+Description=Configure bit rate and bring up CAN interface %I
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=CAN_BITRATE=500000
+EnvironmentFile=-/etc/default/can-bitrate-%i
+ExecStart=/sbin/ip link set dev %I down
+ExecStart=/sbin/ip link set dev %I type can bitrate ${CAN_BITRATE} restart-ms 100
+ExecStart=/sbin/ip link set dev %I up
+ExecStop=/sbin/ip link set dev %I down
+
+[Install]
+WantedBy=sys-subsystem-net-devices-%i.device

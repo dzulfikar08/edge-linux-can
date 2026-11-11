@@ -1,0 +1,2 @@
+# can-demo on the bridged CAN controller uses its own heartbeat id.
+CAN_DEMO_ID=0x101

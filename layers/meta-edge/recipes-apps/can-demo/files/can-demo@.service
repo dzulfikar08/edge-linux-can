@@ -1,0 +1,31 @@
+[Unit]
+Description=CAN heartbeat sender and frame counter on %I
+Documentation=file:///usr/share/doc/can-demo
+# Start when the network interface exists (vcan0 is created by vcan@vcan0,
+# can0 appears when the PCI CAN controller's driver loads), stop if it goes.
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device can-bitrate@%i.service vcan@%i.service
+
+[Service]
+Type=notify
+Environment=CAN_DEMO_IFACE=%I
+# Optional overrides, e.g. CAN_DEMO_ID=0x101, CAN_DEMO_INTERVAL_MS=500
+EnvironmentFile=-/etc/default/can-demo-%i
+ExecStart=/usr/bin/can-demo
+Restart=on-failure
+RestartSec=2s
+WatchdogSec=10s
+DynamicUser=yes
+# /var/lib/can-demo, writable for this service even with ProtectSystem=strict.
+# /var/lib lives on the data partition, so the start count survives updates.
+StateDirectory=can-demo
+# A CAN_RAW socket needs no extra capability; lock the rest down.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_CAN AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=sys-subsystem-net-devices-%i.device

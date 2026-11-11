@@ -1,0 +1,23 @@
+[Unit]
+Description=Health check: is this software version working?
+Documentation=file:///usr/libexec/edge-health
+# systemd's boot assessment pattern: boot-complete.target is reached only if
+# every unit that is RequiredBy it succeeds. rauc-mark-good.service (from
+# meta-rauc) runs after boot-complete.target and marks the slot good.
+Before=boot-complete.target
+After=vcan@vcan0.service can-demo@vcan0.service
+# A failed check reboots: the boot counter in U-Boot does the rest.
+FailureAction=reboot
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/edge-health
+ExecStart=/usr/libexec/edge-health
+# The verdict also goes to the serial console: after boot, systemd no longer
+# prints unit status there, and a failing device should say why it reboots.
+StandardOutput=journal+console
+TimeoutStartSec=120
+
+[Install]
+RequiredBy=boot-complete.target

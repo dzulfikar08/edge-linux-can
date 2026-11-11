@@ -1,0 +1,263 @@
+$ scripts/qemu-ab.sh
+wrote /mnt/yocto/build/tmp/ab-forged/foreign-signed.raucb
+wrote /mnt/yocto/build/tmp/ab-forged/wrong-compatible.raucb
++ /build/tmp/work/x86_64-linux/qemu-helper-native/1.0/recipe-sysroot-native/usr/bin/qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 4 -m 512 -nographic -bios /build/tmp/deploy/images/qemuarm64/u-boot.bin -drive if=pflash,format=raw,index=1,file=/build/tmp/ab-test/u-boot-env.img -drive if=none,id=disk0,format=raw,file=/build/tmp/ab-test/disk.wic -device virtio-blk-pci,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,netdev=net0 -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 -device i6300esb
+--- boot 1: fresh disk: edge-boot: slot A (partition 2), attempts lef (login after 22s)
+[PASS] U-Boot picks slot A on a fresh disk
+  $ sed -n 's/^VERSION=//p' /usr/lib/edge-release; sed 's/.*rauc.slot=\([AB]\).*/\1/' /proc/cmdline
+    1.0.0
+    A
+[PASS] running slot A, version 1.0.0
+  $ touch /usr/x 2>&1; touch /etc/x-test && rm /etc/x-test && echo etc-writable; awk '$2=="/"' /proc/mounts
+    touch: /usr/x: Read-only file system
+    etc-writable
+    /dev/root / ext4 ro,relatime 0 0
+[PASS] rootfs read-only, /etc writable (overlay)
+  $ rauc status --detailed 2>&1 | sed -n '1,30p'
+    === System Info ===
+    Compatible:  edge-qemuarm64
+    Variant:     
+    Booted from: rootfs.0 (A)
+    === Bootloader ===
+    Activated: rootfs.0 (A)
+    === Slot States ===
+    o [rootfs.1] (/dev/vda3, ext4, inactive)
+          bootname: B
+          boot status: good
+          slot status:
+              bundle:
+                  compatible=(null)
+              installed:
+    x [rootfs.0] (/dev/vda2, ext4, booted)
+          bootname: A
+          mounted: /
+          boot status: good
+          slot status:
+              bundle:
+                  compatible=(null)
+              installed:
+[PASS] rauc: booted from A, A marked good
+  $ fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+    BOOT_ORDER=A B
+    BOOT_A_LEFT=3
+    BOOT_B_LEFT=3
+[PASS] U-Boot env readable from Linux, A has 3 attempts again
+  $ cat /proc/sys/kernel/random/uuid | tee /data/ab-test-marker
+    c0c4c2ba-7796-4b19-a471-4a532f86c51f
+  $ cat /etc/machine-id
+    d42eb6344304402ebd22c6ac548c4aed
+  $ cat /var/lib/can-demo/vcan0.starts
+    1
+  $ journalctl -b -u edge-health --no-pager -o cat | tail -n 2
+    edge-health: healthy (slot A, version 1.0.0): can-demo@vcan0.service
+    Finished Health check: is this software version working?.
+  $ rauc info /data/update.raucb 2>&1 | head -n 16
+    rauc-Message: 03:58:12.820: Using central status file /data/rauc/central.raucs
+    rauc-Message: 03:58:12.822: Using system config file /usr/lib/rauc/system.conf
+    rauc-Message: 03:58:12.823: Reading bundle: /data/update.raucb
+    rauc-Message: 03:58:12.913: Verifying bundle signature... 
+    signature verification failed: Verify error: unable to get local issuer certificate
+  $ rauc install /data/update.raucb > /tmp/install.log 2>&1; echo "exit=$?"; tail -n 4 /tmp/install.log
+    exit=1
+     20% Checking bundle failed.
+    100% Installing failed.
+    LastError: signature verification failed: Verify error: unable to get local issuer certificate
+    Installing `/data/update.raucb` failed
+[PASS] bundle signed by an untrusted CA is refused
+  $ rauc info /data/update.raucb 2>&1 | head -n 16
+    rauc-Message: 03:58:16.208: Using central status file /data/rauc/central.raucs
+    rauc-Message: 03:58:16.210: Using system config file /usr/lib/rauc/system.conf
+    rauc-Message: 03:58:16.210: Reading bundle: /data/update.raucb
+    rauc-Message: 03:58:16.232: Verifying bundle signature... 
+    rauc-Message: 03:58:16.305: Verified inline signature by 'O = edge-linux-can, CN = edge-linux-can dev bundle signing - DEVELOPMENT ONLY'
+    Compatible:     'some-other-product'
+    Version:        '1.1.0'
+    Description:    'RAUC update bundle: edge release 1.1.0'
+    Build:          '20261111033355'
+    Hooks:          ''
+    Bundle Format:  verity
+      Verity Salt:  'd4b517feac9c5c9685169c321f278d827a458b6e03f48a514bc8be08180308a0'
+      Verity Hash:  '288019e36f98658ea6cded7a5b95d9fcad58a2aec2c425f15a175ab562a0477f'
+      Verity Size:  315392
+    Manifest Hash:  '22e4664f427f1269ec8cdc1544919be88b7ff676dd5268c76b364ebe03244274'
+  $ rauc install /data/update.raucb > /tmp/install.log 2>&1; echo "exit=$?"; tail -n 4 /tmp/install.log
+    exit=1
+     40% Determining target install group done.
+    100% Installing failed.
+    LastError: Compatible mismatch: Expected 'edge-qemuarm64' but bundle manifest has 'some-other-product'
+    Installing `/data/update.raucb` failed
+[PASS] bundle for another product (wrong compatible) is refused
+  $ rauc info /data/update.raucb 2>&1 | head -n 16
+    rauc-Message: 03:58:18.531: Using central status file /data/rauc/central.raucs
+    rauc-Message: 03:58:18.532: Using system config file /usr/lib/rauc/system.conf
+    rauc-Message: 03:58:18.532: Reading bundle: /data/update.raucb
+    rauc-Message: 03:58:18.550: Verifying bundle signature... 
+    rauc-Message: 03:58:18.560: Verified inline signature by 'O = edge-linux-can, CN = edge-linux-can dev bundle signing - DEVELOPMENT ONLY'
+    Compatible:     'edge-qemuarm64'
+    Version:        '1.1.0'
+    Description:    'RAUC update bundle: edge release 1.1.0'
+    Build:          '20261111033355'
+    Hooks:          ''
+    Bundle Format:  verity
+      Verity Salt:  'd4b517feac9c5c9685169c321f278d827a458b6e03f48a514bc8be08180308a0'
+      Verity Hash:  '288019e36f98658ea6cded7a5b95d9fcad58a2aec2c425f15a175ab562a0477f'
+      Verity Size:  315392
+    Manifest Hash:  '0b2d738887907d61570423bdbc64812e0ab136070566abf526efc1c4346efda0'
+  $ rauc install /data/update.raucb > /tmp/install.log 2>&1; echo "exit=$?"; tail -n 4 /tmp/install.log
+    exit=0
+     99% Updating slots done.
+    100% Installing done.
+    idle
+    Installing `/data/update.raucb` succeeded
+[PASS] rauc install edge-bundle (1.1.0) succeeded
+  $ fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+    BOOT_ORDER=B A
+    BOOT_A_LEFT=3
+    BOOT_B_LEFT=3
+[PASS] RAUC put slot B first in BOOT_ORDER
+--- boot 2: after installing 1.1.0: edge-boot: slot B (partition 3) (login after 25s)
+  $ sed -n 's/^VERSION=//p' /usr/lib/edge-release; sed 's/.*rauc.slot=\([AB]\).*/\1/' /proc/cmdline
+    1.1.0
+    B
+[PASS] after reboot: slot B, version 1.1.0
+  $ cat /data/ab-test-marker
+    c0c4c2ba-7796-4b19-a471-4a532f86c51f
+[PASS] data partition survived the update (marker file)
+  $ cat /etc/machine-id
+    d42eb6344304402ebd22c6ac548c4aed
+[PASS] machine-id survived (kept in the /etc overlay on /data)
+  $ cat /var/lib/can-demo/vcan0.starts
+    2
+[PASS] can-demo start counter kept counting (/var/lib on /data)
+  $ journalctl --list-boots --no-pager | tail -n 3; journalctl -b -1 --no-pager -o cat -u edge-health | grep '^edge-health:'
+    IDX BOOT ID                          FIRST ENTRY                 LAST ENTRY
+     -1 2405a6c7a8dd4f6c922de8bbfbe36b7c Wed 2026-11-11 03:56:41 UTC Wed 2026-11-11 03:58:32 UTC
+      0 b3289b40b8644547b21f3f2642987a1d Wed 2026-11-11 03:58:46 UTC Wed 2026-11-11 04:00:14 UTC
+    edge-health: healthy (slot A, version 1.0.0): can-demo@vcan0.service
+[PASS] journal of the previous boot (slot A) is readable
+  $ rauc status 2>&1 | sed -n '1,25p'
+    === System Info ===
+    Compatible:  edge-qemuarm64
+    Variant:     
+    Booted from: rootfs.1 (B)
+    === Bootloader ===
+    Activated: rootfs.1 (B)
+    === Slot States ===
+    x [rootfs.1] (/dev/vda3, ext4, booted)
+          bootname: B
+          mounted: /
+          boot status: good
+    o [rootfs.0] (/dev/vda2, ext4, inactive)
+          bootname: A
+          boot status: good
+[PASS] rauc: booted from B, B marked good
+  $ fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+    BOOT_ORDER=B A
+    BOOT_A_LEFT=3
+    BOOT_B_LEFT=3
+  $ rauc info /data/update.raucb 2>&1 | head -n 16
+    rauc-Message: 04:00:17.812: Using central status file /data/rauc/central.raucs
+    rauc-Message: 04:00:17.814: Using system config file /usr/lib/rauc/system.conf
+    rauc-Message: 04:00:17.817: Reading bundle: /data/update.raucb
+    rauc-Message: 04:00:17.931: Verifying bundle signature... 
+    rauc-Message: 04:00:18.002: Verified inline signature by 'O = edge-linux-can, CN = edge-linux-can dev bundle signing - DEVELOPMENT ONLY'
+    Compatible:     'edge-qemuarm64'
+    Version:        '1.2.0-broken'
+    Description:    'RAUC update bundle with a broken release (1.2.0-broken), for rollback tests'
+    Build:          '20261111033355'
+    Hooks:          ''
+    Bundle Format:  verity
+      Verity Salt:  'a6fecf3cde6031d62d9ef805f4f2f5234b00523e3aca786ec54c61f7769f4d98'
+      Verity Hash:  '2d07e858768410aea48b40f693e1195cb156da8faffaaa575a92dc4ee980c264'
+      Verity Size:  315392
+    Manifest Hash:  'e219d960dba1be2fbb51532c894a7e4ec62630274aaeded70c8c52da4a031d13'
+  $ rauc install /data/update.raucb > /tmp/install.log 2>&1; echo "exit=$?"; tail -n 4 /tmp/install.log
+    exit=0
+     99% Copying image to rootfs.0 done.
+     99% Updating slots done.
+    100% Installing done.
+    Installing `/data/update.raucb` succeeded
+[PASS] rauc install edge-bundle-broken (1.2.0-broken) succeeded
+  $ fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+    BOOT_ORDER=A B
+    BOOT_A_LEFT=3
+    BOOT_B_LEFT=3
+[PASS] RAUC put slot A first in BOOT_ORDER
+--- broken slot A booted 3 times before U-Boot chose B (218s):
+    edge-boot: slot A (partition 2), attempts left A=2 B=3, order A B
+    edge-boot: slot A (partition 2), attempts left A=1 B=3, order A B
+    edge-boot: slot A (partition 2), attempts left A=0 B=3, order A B
+[PASS] U-Boot tried the broken slot A 3 times, then fell back to B
+    edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+    edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+    edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+[PASS] each of those boots printed the failed health check on the console
+--- boot 6: rollback
+  $ sed -n 's/^VERSION=//p' /usr/lib/edge-release; sed 's/.*rauc.slot=\([AB]\).*/\1/' /proc/cmdline
+    1.1.0
+    B
+[PASS] after rollback: slot B, version 1.1.0
+  $ journalctl --list-boots --no-pager | tail -n 5; journalctl --no-pager -o cat -u edge-health | grep -E 'UNHEALTHY|healthy' | tail -n 5
+    -4 b3289b40b8644547b21f3f2642987a1d Wed 2026-11-11 03:58:46 UTC Wed 2026-11-11 04:00:32 UTC
+     -3 b749e92210e045f5a2e3dd8005c5ccc9 Wed 2026-11-11 04:00:49 UTC Wed 2026-11-11 04:01:44 UTC
+     -2 e29070ed2165418f8f821cb25316e3a9 Wed 2026-11-11 04:01:58 UTC Wed 2026-11-11 04:02:50 UTC
+     -1 f8b1b555b0594a11b271856ee7318b0c Wed 2026-11-11 04:03:04 UTC Wed 2026-11-11 04:04:02 UTC
+      0 54578a36650b43ea8add4955ca06d6b0 Wed 2026-11-11 04:04:32 UTC Wed 2026-11-11 04:05:58 UTC
+    edge-health: healthy (slot B, version 1.1.0): can-demo@vcan0.service
+    edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+    edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+    edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+    edge-health: healthy (slot B, version 1.1.0): can-demo@vcan0.service
+[PASS] journal shows the unhealthy boots of 1.2.0-broken
+  $ rauc status --detailed 2>&1 | sed -n '1,40p'
+    === System Info ===
+    Compatible:  edge-qemuarm64
+    Variant:     
+    Booted from: rootfs.1 (B)
+    === Bootloader ===
+    Activated: rootfs.1 (B)
+    === Slot States ===
+    x [rootfs.1] (/dev/vda3, ext4, booted)
+          bootname: B
+          mounted: /
+          boot status: good
+          slot status:
+              bundle:
+                  compatible=edge-qemuarm64
+                  version=1.1.0
+                  description=RAUC update bundle: edge release 1.1.0
+                  build=20261111033355
+                  hash=0b2d738887907d61570423bdbc64812e0ab136070566abf526efc1c4346efda0
+              checksum:
+                  sha256=27495a446cae8c3c7e913020c8208c20e58856f75a2928da7f82987362d93761
+                  size=173.1 MB (173096960 bytes)
+              installed:
+                  timestamp=2026-11-11T03:58:28Z
+                  count=1
+              activated:
+                  timestamp=2026-11-11T03:58:29Z
+                  count=1
+              status=ok
+    o [rootfs.0] (/dev/vda2, ext4, inactive)
+          bootname: A
+          boot status: bad
+          slot status:
+              bundle:
+                  compatible=edge-qemuarm64
+                  version=1.2.0-broken
+                  description=RAUC update bundle with a broken release (1.2.0-broken), for rollback tests
+                  build=20261111033355
+[PASS] rauc: booted from B, slot A bad
+  $ fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+    BOOT_ORDER=A B
+    BOOT_A_LEFT=0
+    BOOT_B_LEFT=3
+  $ cat /data/ab-test-marker
+    c0c4c2ba-7796-4b19-a471-4a532f86c51f
+[PASS] data partition still intact after the rollback
+  $ df -h / /data | sed 's/  */ /g'
+    Filesystem Size Used Available Use% Mounted on
+    /dev/root 149.2M 105.8M 31.9M 77% /
+    /dev/vda4 237.9M 10.0M 211.1M 5% /data
+[PASS] clean poweroff
+24/24 checks passed in 581s

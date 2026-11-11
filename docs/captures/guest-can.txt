@@ -1,0 +1,43 @@
+root@qemuarm64:~# ip -details -statistics link show can0
+5: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 16 qdisc pfifo_fast state UP mode DEFAULT group default qlen 10
+    link/can  promiscuity 0 allmulti 0 minmtu 16 maxmtu 16 
+    can state ERROR-ACTIVE (berr-counter tx 0 rx 0) restart-ms 100 
+	  bitrate 500000 sample-point 0.875
+	  tq 125 prop-seg 6 phase-seg1 7 phase-seg2 2 sjw 1 brp 1
+	  sja1000: tseg1 1..16 tseg2 1..8 sjw 1..4 brp 1..64 brp_inc 1
+	  clock 8000000 
+	  re-started bus-errors arbit-lost error-warn error-pass bus-off
+	  0          0          0          0          0          0         numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 parentbus pci parentdev 0000:00:06.0 
+    RX:  bytes packets errors dropped  missed   mcast           
+          1336     167      0       0       0       0 
+    TX:  bytes packets errors dropped carrier collsns           
+           680      85      0       0       0       0 
+root@qemuarm64:~# systemctl is-active can-bitrate@can0.service can-demo@can0.service
+active
+active
+root@qemuarm64:~# candump -n 6 -T 5000 -td can0,321:7FF,101:7FF
+ (000.000000)  can0  321   [8]  48 4F 53 54 E6 00 00 00
+ (000.299355)  can0  101   [8]  55 00 00 00 48 42 54 31
+ (000.300803)  can0  321   [8]  48 4F 53 54 E7 00 00 00
+ (000.500986)  can0  321   [8]  48 4F 53 54 E8 00 00 00
+ (000.199853)  can0  101   [8]  56 00 00 00 48 42 54 31
+ (000.300190)  can0  321   [8]  48 4F 53 54 E9 00 00 00
+root@qemuarm64:~# cat /sys/class/watchdog/watchdog0/identity /sys/class/watchdog/watchdog0/state /sys/class/watchdog/watchdog0/timeout; systemctl show -p RuntimeWatchdogUSec
+i6300ESB timer
+active
+30
+RuntimeWatchdogUSec=30s
+root@qemuarm64:~# sleep 11
+root@qemuarm64:~# journalctl -b -o short-monotonic --no-pager -u 'can-demo@*' | tail -n 12
+[   57.691476] qemuarm64 can-demo[208]: listener: frames total=41 errors=0 heartbeat_last_seq=40 heartbeat_missed=0 ids[0x100=41]
+[   58.339046] qemuarm64 can-demo[226]: listener: frames total=119 errors=0 heartbeat_last_seq=40 heartbeat_missed=0 ids[0x101=41 0x321=78]
+[   67.703308] qemuarm64 can-demo[208]: listener: frames total=51 errors=0 heartbeat_last_seq=50 heartbeat_missed=0 ids[0x100=51]
+[   68.354404] qemuarm64 can-demo[226]: listener: frames total=149 errors=0 heartbeat_last_seq=50 heartbeat_missed=0 ids[0x101=51 0x321=98]
+[   77.712980] qemuarm64 can-demo[208]: listener: frames total=61 errors=0 heartbeat_last_seq=60 heartbeat_missed=0 ids[0x100=61]
+[   78.369456] qemuarm64 can-demo[226]: listener: frames total=179 errors=0 heartbeat_last_seq=60 heartbeat_missed=0 ids[0x101=61 0x321=118]
+[   87.722746] qemuarm64 can-demo[208]: listener: frames total=71 errors=0 heartbeat_last_seq=70 heartbeat_missed=0 ids[0x100=71]
+[   88.384654] qemuarm64 can-demo[226]: listener: frames total=208 errors=0 heartbeat_last_seq=70 heartbeat_missed=0 ids[0x101=71 0x321=137]
+[   97.733731] qemuarm64 can-demo[208]: listener: frames total=81 errors=0 heartbeat_last_seq=80 heartbeat_missed=0 ids[0x100=81]
+[   98.399569] qemuarm64 can-demo[226]: listener: frames total=238 errors=0 heartbeat_last_seq=79 heartbeat_missed=0 ids[0x101=80 0x321=158]
+[  107.744453] qemuarm64 can-demo[208]: listener: frames total=91 errors=0 heartbeat_last_seq=90 heartbeat_missed=0 ids[0x100=91]
+[  108.413790] qemuarm64 can-demo[226]: listener: frames total=268 errors=0 heartbeat_last_seq=90 heartbeat_missed=0 ids[0x101=91 0x321=177]

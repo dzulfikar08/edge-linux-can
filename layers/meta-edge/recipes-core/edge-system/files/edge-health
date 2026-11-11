@@ -1,0 +1,39 @@
+#!/bin/sh
+# Decide whether this boot is healthy.
+#
+# Exit 0: edge-health.service succeeds, boot-complete.target is reached, and
+#         rauc-mark-good.service runs `rauc status mark-good`: the slot is
+#         good and U-Boot's attempt counter for it goes back to 3.
+# Exit 1: the service fails and its FailureAction=reboot reboots the device.
+#         The slot is not marked good, so every such boot uses one of its
+#         attempts; after the last one U-Boot boots the other slot (rollback).
+#
+# Checked: every unit in EDGE_HEALTH_UNITS becomes active within
+# EDGE_HEALTH_TIMEOUT seconds and has not restarted EDGE_HEALTH_SETTLE seconds later.
+set -u
+units=${EDGE_HEALTH_UNITS:-can-demo@vcan0.service}
+timeout=${EDGE_HEALTH_TIMEOUT:-40}
+settle=${EDGE_HEALTH_SETTLE:-5}
+slot=$(sed -n 's/.*rauc\.slot=\([^ ]*\).*/\1/p' /proc/cmdline)
+version=$(sed -n 's/^VERSION=//p' /usr/lib/edge-release 2>/dev/null)
+
+fail() {
+    echo "edge-health: UNHEALTHY (slot ${slot:-?}, version ${version:-?}): $*"
+    exit 1
+}
+
+for u in $units; do
+    waited=0
+    until systemctl -q is-active "$u"; do
+        waited=$((waited + 1))
+        [ "$waited" -lt "$timeout" ] || fail "$u is $(systemctl is-active "$u") after ${timeout}s"
+        sleep 1
+    done
+done
+sleep "$settle"
+for u in $units; do
+    systemctl -q is-active "$u" || fail "$u stopped: $(systemctl is-active "$u")"
+    n=$(systemctl show -P NRestarts "$u")
+    [ "$n" = 0 ] || fail "$u restarted $n times"
+done
+echo "edge-health: healthy (slot ${slot:-?}, version ${version:-?}): $units"

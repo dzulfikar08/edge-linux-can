@@ -1,0 +1,84 @@
+# kas build configuration: Yocto 6.0 "Wrynose" (LTS), qemuarm64, systemd.
+# Build:  scripts/kas build kas/qemuarm64.yml
+header:
+  version: 18
+
+machine: qemuarm64
+distro: poky
+target:
+  - edge-image          # disk image (wic): U-Boot script, rootfs A, empty rootfs B, data
+  - edge-bundle         # signed RAUC update bundle with edge-image-update (version 1.1.0)
+  - edge-bundle-broken  # signed bundle whose can-demo fails: used to test rollback
+
+defaults:
+  repos:
+    # Layers are pinned to the commits behind the yocto-6.0.4 tags.
+    branch: wrynose
+
+repos:
+  # This repository: provides layers/meta-edge.
+  edge-linux-can:
+    layers:
+      layers/meta-edge:
+
+  # oe-core no longer ships bitbake; oe-init-build-env finds it in ../bitbake,
+  # so the repo names below matter (kas checks them out side by side).
+  bitbake:
+    url: https://git.openembedded.org/bitbake
+    commit: 51fd94a67fa17650a9ff623492005972bbc7d26f   # yocto-6.0.4
+    branch: "2.18"
+    layers:
+      .: disabled
+
+  openembedded-core:
+    url: https://git.openembedded.org/openembedded-core
+    commit: 0f03c732a0a2d0506b41b1abe60b3f368b2300dc   # yocto-6.0.4
+    layers:
+      meta:
+
+  meta-yocto:
+    url: https://git.yoctoproject.org/meta-yocto
+    commit: 7c25b11156553145fa6b241a2d4f65d94438f804   # yocto-6.0.4
+    layers:
+      meta-poky:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    commit: c0fcd7cca3760ef24e087ac4a31b8f357cb204da   # wrynose, 2026-11-10
+    layers:
+      meta-oe:          # can-utils
+
+  # RAUC: A/B update client, bundle class, kernel/busybox config it needs.
+  meta-rauc:
+    url: https://github.com/rauc/meta-rauc
+    commit: 38da0e5866a953e664001ba90b5edad68d68cd5d   # wrynose, 2026-06-02 (RAUC 1.15.2)
+    layers:
+      .:
+
+local_conf_header:
+  init: |
+    INIT_MANAGER = "systemd"
+  update: |
+    # RAUC A/B updates. The distro feature turns on meta-rauc's kernel and
+    # busybox config fragments (loop, squashfs, dm-verity for verity bundles).
+    DISTRO_FEATURES:append = " rauc"
+    # Boot through U-Boot instead of QEMU loading the kernel directly: U-Boot
+    # picks slot A or B and counts boot attempts (see layers/meta-edge/recipes-bsp/u-boot).
+    PREFERRED_PROVIDER_virtual/bootloader = "u-boot"
+  disk: |
+    # Delete each recipe's work dir once it is packaged: keeps tmp/ small.
+    INHERIT += "rm_work"
+    # Keep the hash equivalence database next to the shared sstate cache.
+    BB_HASHSERVE_DB_DIR = "${SSTATE_DIR}"
+    # Abort cleanly before the build disk fills up.
+    BB_DISKMON_DIRS = "STOPTASKS,${TMPDIR},1G,100K STOPTASKS,${DL_DIR},1G,100K STOPTASKS,${SSTATE_DIR},1G,100K HALT,${TMPDIR},100M,1K"
+  parallel: |
+    # 12 cores / 30 GB RAM: leave headroom for rustc and the desktop.
+    BB_NUMBER_THREADS = "8"
+    PARALLEL_MAKE = "-j 8"
+  dev: |
+    # Development image only: root logs in without a password on the serial console.
+    EXTRA_IMAGE_FEATURES = "allow-empty-password empty-root-password allow-root-login"
+  qemu: |
+    # runqemu: no graphics, serial console on stdio.
+    QB_GRAPHICS = ""

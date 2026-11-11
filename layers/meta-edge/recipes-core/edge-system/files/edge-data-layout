@@ -1,0 +1,13 @@
+#!/bin/sh
+# Create the directories the system expects on the data partition. Runs at
+# every boot; on the first boot (or after the partition was reformatted) it
+# builds the layout from nothing.
+#   /data/log          /var/log points here (a symlink in the read-only rootfs)
+#   /data/log/journal  persistent systemd journal
+#   /data/rauc         RAUC's slot status (data-directory in system.conf)
+#   /data/var-lib      upper layer of the /var/lib overlay (volatile-binds)
+#   /data/overlay-etc  upper layer of the /etc overlay (made by /sbin/init, overlayfs-etc)
+set -eu
+mkdir -p /data/log/journal /data/rauc
+chown root:systemd-journal /data/log/journal
+chmod 2755 /data/log/journal

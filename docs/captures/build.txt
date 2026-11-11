@@ -1,0 +1,40 @@
+$ scripts/kas build kas/qemuarm64.yml
+kas 5.5 started on Debian GNU/Linux trixie
+Using /repo as root for repository edge-linux-can
+Repository bitbake checked out to 51fd94a67fa17650a9ff623492005972bbc7d26f
+Repository openembedded-core checked out to 0f03c732a0a2d0506b41b1abe60b3f368b2300dc
+Repository meta-yocto checked out to 7c25b11156553145fa6b241a2d4f65d94438f804
+Repository meta-openembedded checked out to c0fcd7cca3760ef24e087ac4a31b8f357cb204da
+Loading cache...done.
+Loaded 3529 entries from dependency cache.
+NOTE: Resolving any missing task queue dependencies
+Build Configuration:
+BB_VERSION           = "2.18.0"
+BUILD_SYS            = "x86_64-linux"
+NATIVELSBSTRING      = "universal"
+TARGET_SYS           = "aarch64-poky-linux"
+MACHINE              = "qemuarm64"
+SDKMACHINE           = "x86_64"
+DISTRO               = "poky"
+DISTRO_VERSION       = "6.0.4"
+TUNE_FEATURES        = "aarch64 crc cortexa57"
+meta-oe              = "wrynose:c0fcd7cca3760ef24e087ac4a31b8f357cb204da"
+meta-poky            = "wrynose:7c25b11156553145fa6b241a2d4f65d94438f804"
+meta                 = "wrynose:0f03c732a0a2d0506b41b1abe60b3f368b2300dc"
+meta-edge            = "main:9f70e886584f6c8b425c3ce961d37e6aa0a75c0e"
+Initialising tasks...Sstate summary: Wanted 723 Local 71 Mirrors 0 Missed 652 Current 2185 (9% match, 77% complete)
+...
+05:52:57  recipe rust-native-1.94.1-r0: task do_install: Started
+06:40:45  recipe rust-native-1.94.1-r0: task do_install: Succeeded
+06:41:20  recipe cargo-native-1.94.1-r0: task do_compile: Started
+07:05:47  recipe cargo-native-1.94.1-r0: task do_compile: Succeeded
+07:11:47  recipe can-demo-0.1.0-r0: task do_compile: Started
+07:12:47  recipe can-demo-0.1.0-r0: task do_compile: Succeeded
+...
+NOTE: Running task 5778 of 5780 (/build/../repo/layers/meta-edge/recipes-core/images/edge-image.bb:do_rm_work)
+NOTE: recipe edge-image-1.0-r0: task do_rm_work: Started
+NOTE: recipe edge-image-1.0-r0: task do_rm_work: Succeeded
+NOTE: Running noexec task 5779 of 5780 (/build/../repo/layers/meta-edge/recipes-core/images/edge-image.bb:do_rm_work_all)
+NOTE: Running noexec task 5780 of 5780 (/build/../repo/layers/meta-edge/recipes-core/images/edge-image.bb:do_build)
+NOTE: Tasks Summary: Attempted 5780 tasks of which 4602 didn't need to be rerun and all succeeded.
+### end 2026-11-11 08:02:25 exit=0 duration=8158s

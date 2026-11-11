@@ -1,0 +1,27 @@
+root@qemuarm64:~# systemctl is-system-running --wait
+running
+root@qemuarm64:~# systemctl --failed --no-legend
+root@qemuarm64:~# uname -a; head -n 3 /etc/os-release; cat /proc/cmdline
+Linux qemuarm64 6.18.52-yocto-standard #1 SMP PREEMPT Wed Sep 23 03:10:06 UTC 2026 aarch64 GNU/Linux
+ID=poky
+NAME="Poky (Yocto Project Reference Distro)"
+VERSION="6.0.4 (wrynose)"
+root=/dev/vda rw  mem=256M ip=dhcp console=ttyAMA0 console=hvc0 swiotlb=0 
+root@qemuarm64:~# lsmod | grep -E '^(can|vcan|kvaser|sja1000)' || true
+can_raw                20480  4
+can                    20480  1 can_raw
+kvaser_pci             12288  0
+sja1000                16384  1 kvaser_pci
+vcan                   12288  0
+can_dev                32768  2 sja1000,vcan
+root@qemuarm64:~# ip -details link show vcan0
+4: vcan0: <NOARP,UP,LOWER_UP> mtu 2060 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/can  promiscuity 0 allmulti 0 minmtu 0 maxmtu 0 
+    vcan addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+root@qemuarm64:~# systemctl is-active vcan@vcan0.service can-demo@vcan0.service
+active
+active
+root@qemuarm64:~# candump -n 3 -T 5000 -td vcan0
+ (000.000000)  vcan0  100   [8]  53 00 00 00 48 42 54 31
+ (001.001830)  vcan0  100   [8]  54 00 00 00 48 42 54 31
+ (001.001073)  vcan0  100   [8]  55 00 00 00 48 42 54 31

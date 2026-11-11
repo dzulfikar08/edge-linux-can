@@ -1,0 +1,17 @@
+[Unit]
+Description=Prepare the directory layout on the data partition
+Documentation=file:///usr/libexec/edge-data-layout
+DefaultDependencies=no
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+# The journal moves from /run to /var/log/journal (= /data/log/journal)
+# when systemd-journal-flush runs, so the directory must exist first.
+Before=local-fs.target systemd-journal-flush.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/edge-data-layout
+
+[Install]
+WantedBy=local-fs.target

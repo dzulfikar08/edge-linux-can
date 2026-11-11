@@ -1,0 +1,15 @@
+[Unit]
+Description=Create virtual CAN interface %I
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/sbin/modprobe vcan
+ExecStart=/bin/sh -c 'ip link show dev %I >/dev/null 2>&1 || ip link add dev %I type vcan'
+ExecStart=/sbin/ip link set dev %I up
+ExecStop=/sbin/ip link delete dev %I
+
+[Install]
+WantedBy=multi-user.target

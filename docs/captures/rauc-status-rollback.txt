@@ -1,0 +1,43 @@
+# rauc status --detailed     (after the rollback; output shortened)
+=== System Info ===
+Compatible:  edge-qemuarm64
+Variant:     
+Booted from: rootfs.1 (B)
+=== Bootloader ===
+Activated: rootfs.1 (B)
+=== Slot States ===
+x [rootfs.1] (/dev/vda3, ext4, booted)
+      bootname: B
+      mounted: /
+      boot status: good
+      slot status:
+          bundle:
+              compatible=edge-qemuarm64
+              version=1.1.0
+              description=RAUC update bundle: edge release 1.1.0
+              build=20261111033355
+              hash=0b2d738887907d61570423bdbc64812e0ab136070566abf526efc1c4346efda0
+          checksum:
+              sha256=27495a446cae8c3c7e913020c8208c20e58856f75a2928da7f82987362d93761
+              size=173.1 MB (173096960 bytes)
+          installed:
+              timestamp=2026-11-11T03:58:28Z
+              count=1
+          activated:
+              timestamp=2026-11-11T03:58:29Z
+              count=1
+          status=ok
+o [rootfs.0] (/dev/vda2, ext4, inactive)
+      bootname: A
+      boot status: bad
+      slot status:
+          bundle:
+              compatible=edge-qemuarm64
+              version=1.2.0-broken
+              description=RAUC update bundle with a broken release (1.2.0-broken), for rollback tests
+              build=20261111033355
+
+# fw_printenv BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+BOOT_ORDER=A B
+BOOT_A_LEFT=0
+BOOT_B_LEFT=3

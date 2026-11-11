@@ -1,0 +1,33 @@
+$ grep -E "edge-boot|edge-health|Kernel command line|Restarting" docs/ab-test.log   # serial console, 6 boots
+
+
+# boot 1: fresh disk
+edge-boot: slot A (partition 2), attempts left A=2 B=3, order A B
+  cmdline: root=/dev/vda2 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 panic=10 rauc.slot=A
+edge-health: healthy (slot A, version 1.0.0): can-demo@vcan0.service
+
+# boot 2: after installing 1.1.0
+reboot: Restarting system
+edge-boot: slot B (partition 3), attempts left A=3 B=2, order B A
+  cmdline: root=/dev/vda3 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 panic=10 rauc.slot=B
+edge-health: healthy (slot B, version 1.1.0): can-demo@vcan0.service
+
+# boots 3-5: broken release in slot A
+reboot: Restarting system
+edge-boot: slot A (partition 2), attempts left A=2 B=3, order A B
+  cmdline: root=/dev/vda2 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 panic=10 rauc.slot=A
+edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+reboot: Restarting system
+edge-boot: slot A (partition 2), attempts left A=1 B=3, order A B
+  cmdline: root=/dev/vda2 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 panic=10 rauc.slot=A
+edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+reboot: Restarting system
+edge-boot: slot A (partition 2), attempts left A=0 B=3, order A B
+  cmdline: root=/dev/vda2 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 panic=10 rauc.slot=A
+edge-health: UNHEALTHY (slot A, version 1.2.0-broken): can-demo@vcan0.service is activating after 40s
+reboot: Restarting system
+
+# boot 6: slot A has no attempts left, U-Boot falls back to B
+edge-boot: slot B (partition 3), attempts left A=0 B=2, order A B
+  cmdline: root=/dev/vda3 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 panic=10 rauc.slot=B
+edge-health: healthy (slot B, version 1.1.0): can-demo@vcan0.service

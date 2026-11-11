@@ -1,0 +1,35 @@
+$ scripts/qemu-ab.sh
+--- boot 1: fresh disk: edge-boot: slot A (partition 2), attempts lef (login after 22s)
+[PASS] U-Boot picks slot A on a fresh disk
+[PASS] running slot A, version 1.0.0
+[PASS] rootfs read-only, /etc writable (overlay)
+[PASS] rauc: booted from A, A marked good
+[PASS] U-Boot env readable from Linux, A has 3 attempts again
+    LastError: signature verification failed: Verify error: unable to get local issuer certificate
+[PASS] bundle signed by an untrusted CA is refused
+    LastError: Compatible mismatch: Expected 'edge-qemuarm64' but bundle manifest has 'some-other-product'
+[PASS] bundle for another product (wrong compatible) is refused
+[PASS] rauc install edge-bundle (1.1.0) succeeded
+[PASS] RAUC put slot B first in BOOT_ORDER
+--- boot 2: after installing 1.1.0: edge-boot: slot B (partition 3) (login after 25s)
+[PASS] after reboot: slot B, version 1.1.0
+[PASS] data partition survived the update (marker file)
+[PASS] machine-id survived (kept in the /etc overlay on /data)
+[PASS] can-demo start counter kept counting (/var/lib on /data)
+[PASS] journal of the previous boot (slot A) is readable
+[PASS] rauc: booted from B, B marked good
+[PASS] rauc install edge-bundle-broken (1.2.0-broken) succeeded
+[PASS] RAUC put slot A first in BOOT_ORDER
+--- broken slot A booted 3 times before U-Boot chose B (218s):
+    edge-boot: slot A (partition 2), attempts left A=2 B=3, order A B
+    edge-boot: slot A (partition 2), attempts left A=1 B=3, order A B
+    edge-boot: slot A (partition 2), attempts left A=0 B=3, order A B
+[PASS] U-Boot tried the broken slot A 3 times, then fell back to B
+[PASS] each of those boots printed the failed health check on the console
+--- boot 6: rollback
+[PASS] after rollback: slot B, version 1.1.0
+[PASS] journal shows the unhealthy boots of 1.2.0-broken
+[PASS] rauc: booted from B, slot A bad
+[PASS] data partition still intact after the rollback
+[PASS] clean poweroff
+24/24 checks passed in 581s

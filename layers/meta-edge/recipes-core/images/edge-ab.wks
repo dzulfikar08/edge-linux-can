@@ -1,0 +1,15 @@
+# Disk layout for A/B updates (GPT, virtio disk /dev/vda in QEMU).
+#
+#   vda1  boot     16 MiB  FAT: U-Boot's boot.scr. U-Boot itself is QEMU's
+#                          firmware (-bios), so it is not on this disk.
+#   vda2  rootfs_a 320 MiB slot A (RAUC bootname A): this image's rootfs
+#   vda3  rootfs_b 320 MiB slot B: empty ext4 until the first update
+#   vda4  data     256 MiB persistent state, never touched by updates
+#
+# RAUC writes a whole new filesystem image into the slot that is not running,
+# so both rootfs partitions have the same size and must fit the ext4 image.
+bootloader --ptable gpt
+part --source bootimg_partition --fstype=vfat --label boot --active --align 1024 --fixed-size 16M
+part / --source rootfs --fstype=ext4 --label rootfs_a --align 1024 --fixed-size 320M
+part --fstype=ext4 --label rootfs_b --align 1024 --fixed-size 320M
+part --fstype=ext4 --label data --align 1024 --fixed-size 256M
