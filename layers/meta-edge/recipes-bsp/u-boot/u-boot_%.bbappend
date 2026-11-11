@@ -24,3 +24,19 @@ SRC_URI += " \
 # can put it on the boot partition (IMAGE_BOOT_FILES in edge-image.bb).
 UBOOT_ENV = "boot"
 UBOOT_ENV_SUFFIX = "scr"
+
+# Hardening: no video stack, so no BMP decoding (see files/no-bmp-rle8.cfg).
+SRC_URI += "file://no-bmp-rle8.cfg"
+
+# CVE triage (docs/cve/README.md). U-Boot 2026.01, qemu_arm64_defconfig plus
+# the fragment above. Each entry names the option that keeps the vulnerable
+# code out of this build; check with `bitbake -c configure u-boot` and
+# grep build/.config. Revisit if the defconfig or the fragments change.
+CVE_STATUS[CVE-2026-71971] = "not-applicable-config: __net_defragment() in net/net.c is only built with CONFIG_IP_DEFRAG, which is not set"
+CVE_STATUS[CVE-2026-74220] = "not-applicable-config: NFS client (net/nfs.c) is only built with CONFIG_CMD_NFS, which is not set"
+CVE_STATUS[CVE-2026-74221] = "not-applicable-config: NFS client (net/nfs.c) is only built with CONFIG_CMD_NFS, which is not set"
+CVE_STATUS[CVE-2026-74222] = "not-applicable-config: lwIP wget (net/lwip/) is only built with CONFIG_NET_LWIP, which is not set (the legacy network stack is used)"
+CVE_STATUS[CVE-2026-74225] = "not-applicable-config: DHCPv6 (net/dhcpv6.c) is only built with CONFIG_CMD_DHCP6, which needs CONFIG_IPV6; neither is set"
+CVE_STATUS[CVE-2026-71972] = "not-applicable-config: files/no-bmp-rle8.cfg disables CONFIG_VIDEO, so drivers/video (video_bmp.c with video_display_rle8_bitmap()) is not built; no video_bmp/rle8 symbols in the u-boot ELF"
+CVE_STATUS[CVE-2026-71973] = "not-applicable-config: SquashFS (fs/squashfs/) is only built with CONFIG_FS_SQUASHFS, which is not set"
+CVE_STATUS[CVE-2026-71974] = "not-applicable-config: read_slotted_partition() is in boot/bootmeth_android.c, only built with CONFIG_BOOTMETH_ANDROID, which is not set"
