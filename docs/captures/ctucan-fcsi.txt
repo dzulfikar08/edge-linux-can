@@ -1,0 +1,23 @@
+# scripts/qemu-smoke.sh (CAN_DEV=ctucan), QEMU 10.2.0 with the patch in
+# layers/meta-edge/recipes-devtools/qemu, 2026-11-11. From docs/first-boot.log.
+
+## Kernel log: the FCSI interrupt (ISR bit 4 = 0x10) moves the driver out of STOPPED
+[   48.121141] ctucanfd_pci 0000:00:05.0 can0: ctu_can_fd device registered
+[   48.124202] ctucanfd_pci 0000:00:05.0 can0: ctucan_err_interrupt: ISR = 0x00000010, rxerr 0, txerr 0, error type 0, pos 0, ALC id_field 0, bit 0
+[   48.124809] ctucanfd_pci 0000:00:05.0 can0: state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE
+[  131.689735] ctucanfd_pci 0000:00:05.0 can0: state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE
+
+## ip -details link show can0 after can-bitrate@can0 started
+5: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 72 qdisc pfifo_fast state UP mode DEFAULT group default qlen 10
+    can <FD> state ERROR-ACTIVE (berr-counter tx 0 rx 0) restart-ms 100 
+	  bitrate 500000 sample-point 0.875
+	  dbitrate 2000000 dsample-point 0.740
+
+## Negative check: stop can-bitrate@can0 (ExecStop: ip link set can0 down), start it again
+# systemctl stop can-demo@can0 can-bitrate@can0; ip -details link show can0
+can <FD> state STOPPED
+# systemctl start can-bitrate@can0 can-demo@can0; ip -details link show can0
+can <FD> state ERROR-ACTIVE
+# dmesg | grep 'can0: state changes'   (one per start of the controller)
+[   48.124809] ctucanfd_pci 0000:00:05.0 can0: state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE
+[  131.689735] ctucanfd_pci 0000:00:05.0 can0: state changes from CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE

@@ -183,13 +183,31 @@ class EdgeCanTest(OERuntimeTestCase):
         out = self.run_ok("ip -details link show can0")
         self.assertIn(",UP", out)
         self.assertRegex(out, r"mtu 72 ", msg=out)
-        # ERROR-ACTIVE on hardware. QEMU's CTU CAN FD model never raises the
-        # fault-confinement interrupt that moves the driver out of STOPPED;
-        # test_bridge_both_directions shows the controller works anyway.
-        self.assertRegex(out, r"can <FD> state (ERROR-ACTIVE|STOPPED)", msg=out)
+        # The driver moves from STOPPED to ERROR-ACTIVE on the controller's
+        # fault-confinement interrupt (FCSI), which QEMU's model raises when
+        # the core is enabled (patched in layers/meta-edge/recipes-devtools/qemu).
+        self.assertIn("can <FD> state ERROR-ACTIVE ", out)
         self.assertRegex(out, r"bitrate 500000 ", msg=out)
         self.assertRegex(out, r"dbitrate 2000000 ", msg=out)
         self.assertIn("ctucanfd", self.run_ok("basename $(readlink /sys/class/net/can0/device/driver)"))
+
+    @OETestDepends(["edge_can.EdgeCanTest.test_bridge_both_directions"])
+    def test_can0_state_follows_controller(self):
+        """STOPPED while can0 is down, ERROR-ACTIVE again after it is brought up."""
+        self.need_bridge()
+        state = "ip -details link show can0 | grep -oE 'can (<[A-Z,_-]*> )?state [A-Z-]+' | sed 's/.* state /state /'"
+        try:
+            self.run_ok("systemctl stop can-demo@can0.service can-bitrate@can0.service", 60)
+            self.assertEqual(self.run_ok(state).strip(), "state STOPPED")
+        finally:
+            self.run_ok("systemctl start can-bitrate@can0.service can-demo@can0.service", 60)
+        self.assertEqual(self.run_ok(state).strip(), "state ERROR-ACTIVE")
+        log = self.run_ok("dmesg | grep -E 'can0: (state changes|.*Invalid error state)' || true")
+        # One transition per start of the controller: at boot and just now.
+        # Linux 6.18 prints "CAN_STATE_STOPPED to CAN_STATE_ERROR_ACTIVE".
+        changes = re.findall(r"state changes from (?:CAN_STATE_)?STOPPED to (?:CAN_STATE_)?ERROR_ACTIVE", log)
+        self.assertEqual(len(changes), 2, msg=log)
+        self.assertNotIn("Invalid", log)
 
     @OETestDepends(["edge_can.EdgeCanTest.test_can0_fd_mode"])
     def test_bridge_both_directions(self):
@@ -225,17 +243,20 @@ class EdgeCanTest(OERuntimeTestCase):
         t = threading.Thread(target=host_side, daemon=True)
         t.start()
         try:
-            out = self.run_ok("candump -L -n 6 -T 10000 can0,321:7FF,322:7FF", 40)
+            # -n 12: host vcan0 is a shared bus, other programs may send these ids too.
+            out = self.run_ok("candump -L -n 12 -T 10000 can0,321:7FF,322:7FF", 40)
             time.sleep(2)  # a couple more guest frames on the host side
         finally:
             stop.set()
             t.join(5)
             sock.close()
 
-        # Guest received the host's frames.
+        # Guest received the host's frames. Only frames with this test's
+        # payload markers count: on a shared bus (host vcan0) other senders
+        # may use the same ids.
         guest = parse_candump(out)
-        classic = [f for f in guest if f[1] == 0x321 and not f[2]]
-        fd = [f for f in guest if f[1] == 0x322 and f[2]]
+        classic = [f for f in guest if f[1] == 0x321 and not f[2] and f[4][:4] == b"HOST"]
+        fd = [f for f in guest if f[1] == 0x322 and f[2] and f[4][:8] == b"HOSTFD01"]
         self.assertTrue(classic and fd, msg=f"guest can0 saw:\n{out}")
         for _, cid, _, flags, data in fd:
             self.assertEqual(len(data), 64)

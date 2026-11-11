@@ -99,11 +99,10 @@ def main():
         if args.can_host and args.can_dev == "ctucan":
             rc, out = con.run("ip -details -statistics link show can0")
             # The driver reports ERROR-ACTIVE after the controller's first
-            # fault-confinement interrupt; QEMU 10.2's CTU CAN FD model never
-            # raises one, so in QEMU the state stays STOPPED while the
-            # controller sends and receives (checked by candump below).
-            check("can0 (ctucan_pci) UP, CAN FD on: mtu 72, 500 kbit/s + 2 Mbit/s data",
-                  rc == 0 and ",UP" in out and re.search(r"can <FD> state (ERROR-ACTIVE|STOPPED)", out) is not None
+            # fault-confinement interrupt (FCSI). QEMU's model raises it when
+            # the core is enabled (layers/meta-edge/recipes-devtools/qemu).
+            check("can0 (ctucan_pci) UP, CAN FD on, ERROR-ACTIVE: mtu 72, 500 kbit/s + 2 Mbit/s data",
+                  rc == 0 and ",UP" in out and "can <FD> state ERROR-ACTIVE " in out
                   and "mtu 72 " in out
                   and "bitrate 500000 " in out and "dbitrate 2000000 " in out, out)
             rc, out = con.run("systemctl is-active can-bitrate@can0.service can-demo@can0.service")
@@ -140,6 +139,20 @@ def main():
         stats = re.findall(r"listener: frames total=\d+ errors=(\d+) fd=(\d+) fd_bad=(\d+) ", out)
         check("can-demo logs frame statistics to the journal (FD frames counted, no errors, none damaged)",
               any(int(fd) > 0 for _, fd, _ in stats) and all(e == "0" and bad == "0" for e, _, bad in stats), out)
+        if args.can_host and args.can_dev == "ctucan":
+            # Negative check: ERROR-ACTIVE comes from the controller, not from
+            # the driver alone. Down: the driver stops the core (STOPPED).
+            # Up again: the core is re-enabled and the driver logs a second
+            # STOPPED -> ERROR_ACTIVE transition from the FCSI interrupt.
+            rc, out = con.run("systemctl stop can-demo@can0.service can-bitrate@can0.service; "
+                              "ip -details link show can0 | grep -oE 'can (<[A-Z,_-]*> )?state [A-Z-]+'; "
+                              "systemctl start can-bitrate@can0.service can-demo@can0.service; "
+                              "ip -details link show can0 | grep -oE 'can (<[A-Z,_-]*> )?state [A-Z-]+'; "
+                              "dmesg | grep -E 'can0: (state changes|.*Invalid error state)'", 60)
+            states = re.findall(r"^can (?:<[A-Z,_-]*> )?state ([A-Z-]+)$", out, re.M)
+            changes = re.findall(r"can0: state changes from (?:CAN_STATE_)?STOPPED to (?:CAN_STATE_)?ERROR_ACTIVE", out)
+            check("can0 state follows the controller: STOPPED when down, ERROR-ACTIVE after up (FCSI on each start)",
+                  states == ["STOPPED", "ERROR-ACTIVE"] and len(changes) == 2 and "Invalid" not in out, out)
         con.run("systemctl show -p WatchdogUSec -p NRestarts -p MainPID can-demo@vcan0.service")
         con.run("systemctl list-units --no-pager 'can*' 'vcan*'")
         con.run("df -h / ; free -m")

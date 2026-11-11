@@ -1,0 +1,15 @@
+# Extra ignores for oe-core's parselogs test case (testimage).
+#
+# oe-core reads parselogs-ignores-<candidate>.txt for "common", TARGET_ARCH
+# and each MACHINEOVERRIDES entry, and takes the FIRST file of that name
+# on the oeqa.runtime.cases path. oe-core has no "aarch64" file, so this
+# one adds to (does not replace) its common, qemuall and qemuarm64 lists.
+#
+# The CTU CAN FD driver logs the fault confinement interrupt (FCSI, bit 4,
+# ISR 0x10) at info level when the controller becomes error-active after
+# "ip link set can0 up". The text contains "err", so parselogs counts it.
+# It is the normal start of the controller, not an error. Only that exact
+# interrupt status and that transition are ignored; any other error
+# interrupt (bus error, error passive, bus off) still fails the test.
+can0: ctucan_err_interrupt: isr = 0x00000010, rxerr 0, txerr 0,
+can0: state changes from can_state_stopped to can_state_error_active
