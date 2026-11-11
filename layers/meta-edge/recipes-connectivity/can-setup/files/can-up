@@ -1,0 +1,31 @@
+#!/bin/sh
+# Configure a CAN controller and bring it up:  can-up IFACE
+#
+# Run by can-bitrate@IFACE.service. Settings come from the environment
+# (the unit reads /etc/default/can-bitrate-IFACE):
+#   CAN_BITRATE     nominal (arbitration phase) bit rate, default 500000
+#   CAN_DBITRATE    data phase bit rate for CAN FD, e.g. 2000000.
+#                   Empty: classic CAN.
+#   CAN_RESTART_MS  restart this long after bus-off, default 100
+#
+# With CAN_DBITRATE set on a controller without CAN FD (e.g. the SJA1000
+# behind kvaser_pci), the kernel refuses "fd on"; then the interface is set
+# up as classic CAN, so one image works with either controller.
+set -eu
+dev=$1
+ip=/sbin/ip
+bitrate=${CAN_BITRATE:-500000}
+dbitrate=${CAN_DBITRATE:-}
+restart=${CAN_RESTART_MS:-100}
+
+$ip link set dev "$dev" down
+if [ -n "$dbitrate" ] &&
+    $ip link set dev "$dev" type can bitrate "$bitrate" dbitrate "$dbitrate" fd on restart-ms "$restart"; then
+    echo "can-up: $dev: CAN FD, bitrate $bitrate, dbitrate $dbitrate"
+else
+    [ -z "$dbitrate" ] || echo "can-up: $dev: controller refused CAN FD, using classic CAN"
+    $ip link set dev "$dev" type can bitrate "$bitrate" restart-ms "$restart"
+    echo "can-up: $dev: classic CAN, bitrate $bitrate"
+fi
+$ip link set dev "$dev" up
+echo "can-up: $dev: up, mtu $(cat "/sys/class/net/$dev/mtu")"

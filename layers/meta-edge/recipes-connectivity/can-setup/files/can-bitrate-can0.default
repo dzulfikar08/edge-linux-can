@@ -1,0 +1,5 @@
+# Bit rates for can0 (read by can-bitrate@can0.service, see /usr/libexec/can-up).
+# Classic CAN arbitration at 500 kbit/s; the CAN FD data phase at 2 Mbit/s.
+# Remove CAN_DBITRATE for classic CAN only.
+CAN_BITRATE=500000
+CAN_DBITRATE=2000000

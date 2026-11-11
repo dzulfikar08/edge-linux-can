@@ -4,9 +4,12 @@
 Runs inside the kas container (`scripts/qemu-smoke.sh` starts it). The whole
 serial console is written to --log. Exit status 0 means every check passed.
 
-With --can-host IFACE the guest gets an emulated Kvaser PCI CAN controller
-(guest can0) on a QEMU CAN bus that is bridged to the host SocketCAN interface
-IFACE. That needs the container to share the host network namespace.
+With --can-host IFACE the guest gets an emulated PCI CAN controller (guest
+can0) on a QEMU CAN bus that is bridged to the host SocketCAN interface IFACE.
+That needs the container to share the host network namespace. --can-dev picks
+the controller: ctucan (CTU CAN FD, default: can0 runs CAN FD at 500 kbit/s /
+2 Mbit/s) or kvaser (SJA1000, classic CAN only: checks that the image falls
+back to classic CAN and sends no FD frames).
 """
 
 import argparse
@@ -24,7 +27,9 @@ def main():
     ap.add_argument("--log", required=True)
     ap.add_argument("--image", default="edge-image")
     ap.add_argument("--can-host", help="host SocketCAN interface to bridge to guest can0")
+    ap.add_argument("--can-dev", choices=["ctucan", "kvaser"], default="ctucan")
     ap.add_argument("--host-id", default="321", help="CAN id (hex) the host sends, checked in the guest")
+    ap.add_argument("--host-fd-id", default="322", help="CAN FD id (hex) the host sends, checked in the guest")
     ap.add_argument("--boot-timeout", type=int, default=900)
     ap.add_argument("--hold", type=int, default=0, help="keep the guest running N seconds before poweroff")
     args = ap.parse_args()
@@ -33,8 +38,15 @@ def main():
     qemuparams = ["-device", "i6300esb"]
     if args.can_host:
         qemuparams += ["-object", "can-bus,id=canbus0",
-                      "-object", f"can-host-socketcan,id=canhost0,if={args.can_host},canbus=canbus0",
-                      "-device", "kvaser_pci,canbus=canbus0"]
+                      "-object", f"can-host-socketcan,id=canhost0,if={args.can_host},canbus=canbus0"]
+        if args.can_dev == "ctucan":
+            # The CTU CAN FD card has two controllers and QEMU wants a bus for
+            # each: core 0 (guest can0) on the bridged bus, core 1 (can1) on
+            # a bus of its own with nothing else on it.
+            qemuparams += ["-object", "can-bus,id=canbus1",
+                           "-device", "ctucan_pci,canbus0=canbus0,canbus1=canbus1"]
+        else:
+            qemuparams += ["-device", "kvaser_pci,canbus=canbus0"]
     # The image's qemuboot.conf makes runqemu boot u-boot.bin as firmware and
     # the wic disk as /dev/vda. snapshot: writes go to a temporary overlay, so
     # the deployed disk image stays as built (the A/B test, qemu-ab.py, uses
@@ -61,7 +73,7 @@ def main():
         rc, out = con.run("systemctl is-system-running --wait", 300)
         check("systemd reports 'running'", out.strip().endswith("running"), out + con.run("systemctl --failed --no-legend")[1])
         con.run("uname -a; head -n 3 /etc/os-release; cat /proc/cmdline")
-        con.run("lsmod | grep -E '^(can|vcan|kvaser|sja1000)' || true")
+        con.run("lsmod | grep -E '^(can|vcan|kvaser|sja1000|ctucan)' || true")
 
         rc, out = con.run("awk '$2==\"/\"{o=$4} END{print o}' /proc/mounts; touch /usr/test-write")
         check("root filesystem is read-only", rc != 0 and out.splitlines()[0].startswith("ro,"), out)
@@ -78,12 +90,37 @@ def main():
         check("vcan0 exists and is UP", rc == 0 and ",UP" in out, out)
         rc, out = con.run("systemctl is-active vcan@vcan0.service can-demo@vcan0.service")
         check("vcan@vcan0 and can-demo@vcan0 active", rc == 0, out)
-        rc, out = con.run("candump -n 3 -T 5000 -td vcan0", 30)
+        rc, out = con.run("candump -n 3 -T 5000 -td vcan0,100:7FF", 30)
         check("candump vcan0 sees can-demo heartbeats (id 100)", rc == 0 and len(re.findall(r"vcan0\s+100\s+\[8\]", out)) == 3, out)
+        rc, out = con.run("candump -n 2 -T 5000 -td vcan0,200:7FF", 30)
+        check("candump vcan0 sees can-demo CAN FD telemetry (id 200, 64 bytes)",
+              rc == 0 and len(re.findall(r"vcan0\s+200\s+\[64\]\s+(?:[0-9A-F]{2} ){4}46 44 54 31", out)) == 2, out)
 
-        if args.can_host:
+        if args.can_host and args.can_dev == "ctucan":
             rc, out = con.run("ip -details -statistics link show can0")
-            check("can0 (kvaser_pci) exists, UP, ERROR-ACTIVE", rc == 0 and ",UP" in out and "ERROR-ACTIVE" in out, out)
+            # The driver reports ERROR-ACTIVE after the controller's first
+            # fault-confinement interrupt; QEMU 10.2's CTU CAN FD model never
+            # raises one, so in QEMU the state stays STOPPED while the
+            # controller sends and receives (checked by candump below).
+            check("can0 (ctucan_pci) UP, CAN FD on: mtu 72, 500 kbit/s + 2 Mbit/s data",
+                  rc == 0 and ",UP" in out and re.search(r"can <FD> state (ERROR-ACTIVE|STOPPED)", out) is not None
+                  and "mtu 72 " in out
+                  and "bitrate 500000 " in out and "dbitrate 2000000 " in out, out)
+            rc, out = con.run("systemctl is-active can-bitrate@can0.service can-demo@can0.service")
+            check("can-bitrate@can0 and can-demo@can0 active", rc == 0, out)
+            ids = f"101:7FF,201:7FF,{args.host_id}:7FF,{args.host_fd_id}:7FF"
+            rc, out = con.run(f"candump -n 12 -T 8000 -td can0,{ids}", 30)
+            hid, fid = args.host_id.upper(), args.host_fd_id.upper()
+            check(f"candump can0: own heartbeat (101) and FD telemetry (201), host classic ({hid}) and FD ({fid}) frames",
+                  re.search(r"can0\s+101\s+\[8\]", out) is not None
+                  and re.search(r"can0\s+201\s+\[64\]", out) is not None
+                  and re.search(rf"can0\s+{hid}\s+\[8\]", out) is not None
+                  and re.search(rf"can0\s+{fid}\s+\[64\]\s+48 4F 53 54 46 44 30 31", out) is not None, out)
+        elif args.can_host:
+            rc, out = con.run("ip -details link show can0; journalctl -b -o cat -u can-bitrate@can0 -u can-demo@can0 | grep -E 'can-up|sender'")
+            check("can0 (kvaser_pci, classic only): can-up fell back to classic CAN, mtu 16, can-demo sends no FD",
+                  ",UP" in out and "mtu 16 " in out and "<FD>" not in out
+                  and "refused CAN FD, using classic CAN" in out and "classic CAN only" in out, out)
             rc, out = con.run("systemctl is-active can-bitrate@can0.service can-demo@can0.service")
             check("can-bitrate@can0 and can-demo@can0 active", rc == 0, out)
             rc, out = con.run(f"candump -n 6 -T 5000 -td can0,{args.host_id}:7FF,101:7FF", 30)
@@ -98,7 +135,11 @@ def main():
 
         con.run("sleep 11")  # let can-demo log one statistics line
         rc, out = con.run("journalctl -b -o short-monotonic --no-pager -u 'can-demo@*' | tail -n 12")
-        check("can-demo logs frame statistics to the journal", "listener: frames total=" in out, out)
+        # One line per instance every 10 s: vcan0 always counts FD frames
+        # (telemetry 0x200); can0 only on a CAN FD controller.
+        stats = re.findall(r"listener: frames total=\d+ errors=(\d+) fd=(\d+) fd_bad=(\d+) ", out)
+        check("can-demo logs frame statistics to the journal (FD frames counted, no errors, none damaged)",
+              any(int(fd) > 0 for _, fd, _ in stats) and all(e == "0" and bad == "0" for e, _, bad in stats), out)
         con.run("systemctl show -p WatchdogUSec -p NRestarts -p MainPID can-demo@vcan0.service")
         con.run("systemctl list-units --no-pager 'can*' 'vcan*'")
         con.run("df -h / ; free -m")

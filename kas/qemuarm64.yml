@@ -9,6 +9,7 @@ target:
   - edge-image          # disk image (wic): U-Boot script, rootfs A, empty rootfs B, data
   - edge-bundle         # signed RAUC update bundle with edge-image-update (version 1.1.0)
   - edge-bundle-broken  # signed bundle whose can-demo fails: used to test rollback
+  - edge-image-test     # edge-image + ptest-runner, can-demo-ptest, ssh: for testimage
 
 defaults:
   repos:
@@ -82,3 +83,39 @@ local_conf_header:
   qemu: |
     # runqemu: no graphics, serial console on stdio.
     QB_GRAPHICS = ""
+  test: |
+    # oeqa runtime tests: `bitbake -c testimage edge-image-test` (scripts/testimage.sh).
+    # The class only adds the task; nothing runs during a normal build.
+    IMAGE_CLASSES += "testimage"
+    # User-mode networking: no tap device, so no root needed. oeqa reaches
+    # the guest's ssh through a forwarded port on 127.0.0.1.
+    TEST_RUNQEMUPARAMS = "slirp"
+    TEST_SERVER_IP = "10.0.2.2"
+    # The same i6300esb watchdog the other tests give the guest.
+    # kas/testimage-can.conf adds the CAN FD controller bridged to host vcan0.
+    TEST_QEMUPARAMS = "-device i6300esb"
+    TEST_QEMUBOOT_TIMEOUT = "900"
+    # ping/ssh/date/systemd/ptest/parselogs come with oe-core; edge_can is
+    # layers/meta-edge/lib/oeqa/runtime/cases/edge_can.py.
+    TEST_SUITES = "ping ssh date systemd ptest parselogs edge_can"
+    # Re-read at test time (not frozen in the image's testdata.json).
+    TESTIMAGE_UPDATE_VARS:append = " EDGE_CAN_HOST"
+    EDGE_CAN_HOST ?= ""
+  sbom: |
+    # SPDX 3.0 SBOMs (create-spdx, on by default in poky) and CVE analysis of
+    # each image's SBOM with sbom-cve-check. Same settings as oe-core's
+    # fragment core/yocto/sbom-cve-check, except that the CVE databases are
+    # pinned (the fragment uses AUTOREV, i.e. a new download on every build).
+    IMAGE_CLASSES += "sbom-cve-check"
+    # VEX: every known CVE with its status (patched, ignored, unpatched).
+    SPDX_INCLUDE_VEX = "all"
+    # List the kernel source files that were compiled, so CVEs in drivers
+    # this kernel does not build can be told apart.
+    SPDX_INCLUDE_COMPILED_SOURCES:pn-linux-yocto = "1"
+    # CVE databases as of 2026-11-11 04:55 UTC. Bump: git ls-remote <url> main.
+    SRCREV:pn-sbom-cve-check-update-nvd-native = "bb8f10f14a5fae4605f71e805dea47de3cd42802"
+    SRCREV:pn-sbom-cve-check-update-cvelist-native = "fdf0970a45fc52e2ebe6df0687758d53d5ff2acc"
+    # Shallow clones (one commit) of the two database repositories instead of
+    # their full histories (several GB each).
+    BB_GIT_SHALLOW:pn-sbom-cve-check-update-nvd-native = "1"
+    BB_GIT_SHALLOW:pn-sbom-cve-check-update-cvelist-native = "1"

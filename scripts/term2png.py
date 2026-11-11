@@ -56,7 +56,11 @@ def highlight(line):
     if line.startswith(("$ ", "root@")):
         return re.sub(r"^(\S+ ?)", lambda m: f"\x1b[1;36m{m.group(1)}\x1b[0m", line, count=1)
     # ERROR-ACTIVE is the healthy CAN bus state, not an error.
-    rules = [(r"\[PASS\]|Succeeded|active$|\bUP\b|running$", "32"), (r"\[FAIL\]|ERROR(?!-ACTIVE)|failed", "31"),
+    # oeqa result lines are coloured by their verdict, not by the test's name
+    # (test_systemd_failed: PASSED is a pass).
+    rules = [(r": FAILED \(|: ERROR \(", "31"), (r": SKIPPED \(", "90"), (r": PASSED \(", "32"),
+             (r"^test result: ok\.|^PASS: |\.\.\. ok$", "32"), (r"^test result: FAILED|^FAIL: |\.\.\. FAILED$", "31"),
+             (r"\[PASS\]|Succeeded|active$|\bUP\b|running$", "32"), (r"\[FAIL\]|ERROR(?!-ACTIVE)|failed", "31"),
              (r"WARNING", "33"), (r"^NOTE:|^\[  OK  \]", "90")]
     for rx, code in rules:
         if re.search(rx, line):

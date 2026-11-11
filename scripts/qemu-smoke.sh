@@ -4,6 +4,7 @@
 #   scripts/qemu-smoke.sh            # bridge guest can0 to host vcan0 if it is up
 #   CAN_HOST=none scripts/qemu-smoke.sh   # guest-only checks (vcan0 inside the guest)
 #   HOLD=300 scripts/qemu-smoke.sh        # keep the guest up 5 minutes after the checks
+#   CAN_DEV=kvaser scripts/qemu-smoke.sh  # classic-only controller instead of CTU CAN FD
 #
 # The serial console log goes to docs/first-boot.log (LOG=... overrides it; the
 # path must be relative to the repo).
@@ -15,6 +16,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
 : "${LOG:=docs/first-boot.log}"
 : "${CAN_HOST:=vcan0}"
+: "${CAN_DEV:=ctucan}"   # ctucan (CAN FD) or kvaser (classic CAN only)
 : "${HOLD:=0}"   # seconds to keep the guest up after the checks (e.g. to watch it from the host)
 
 # The log is written from inside the container, where only this repo is mounted (/repo).
@@ -27,8 +29,8 @@ host_pid=""
 host_out=$(mktemp /tmp/host-can.XXXXXX.json)
 if [ "$CAN_HOST" != none ] && ip link show "$CAN_HOST" 2>/dev/null | grep -q ',UP'; then
     echo "host $CAN_HOST is up: bridging it to guest can0"
-    can_args="--can-host $CAN_HOST"
-    python3 scripts/host-can.py --iface "$CAN_HOST" --send-id 321 --out "$host_out" &
+    can_args="--can-host $CAN_HOST --can-dev $CAN_DEV"
+    python3 -I scripts/host-can.py --iface "$CAN_HOST" --send-id 321 --send-fd-id 322 --out "$host_out" &
     host_pid=$!
 else
     echo "no host CAN interface: guest-only checks"
@@ -45,11 +47,25 @@ if [ -n "$host_pid" ]; then
     wait "$host_pid" 2>/dev/null || true
     echo "host side ($CAN_HOST):"
     cat "$host_out"
-    # The guest's can-demo@can0 sends heartbeats with id 0x101.
+    # The guest's can-demo@can0 sends heartbeats with id 0x101 (classic) and,
+    # on a CAN FD controller, telemetry with id 0x201 (FD, 64 bytes).
     if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["received"].get("101",0)>0 else 1)' "$host_out"; then
         echo "[PASS] host $CAN_HOST received guest heartbeats (id 101)"
     else
         echo "[FAIL] host $CAN_HOST saw no guest heartbeats"
+        rc=1
+    fi
+    if [ "$CAN_DEV" = ctucan ]; then
+        if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); t=d["telemetry"]; sys.exit(0 if d["received_fd"].get("201",0)>0 and t["intact"]>0 and t["damaged"]==0 else 1)' "$host_out"; then
+            echo "[PASS] host $CAN_HOST received guest CAN FD telemetry (id 201, 64 bytes intact, decoded with the DBC)"
+        else
+            echo "[FAIL] host $CAN_HOST saw no intact guest CAN FD telemetry"
+            rc=1
+        fi
+    elif python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(1 if d["received_fd"] else 0)' "$host_out"; then
+        echo "[PASS] host $CAN_HOST received no FD frames from the classic-only controller"
+    else
+        echo "[FAIL] FD frames arrived from a classic-only controller"
         rc=1
     fi
 fi
